@@ -17,7 +17,7 @@ def run_migrations() -> None:
 
     engine = get_engine()
     config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
-    config.set_main_option("sqlalchemy.url", database_url)
+    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
     with engine.begin() as connection:
         connection.execute(text("SELECT pg_advisory_lock(:lock_id)"), {"lock_id": MIGRATION_LOCK_ID})

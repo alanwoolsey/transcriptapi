@@ -217,8 +217,8 @@ resource "aws_db_subnet_group" "this" {
 }
 
 resource "aws_db_parameter_group" "postgres" {
-  name   = "${local.name_prefix}-postgres16"
-  family = "postgres16"
+  name   = "${local.name_prefix}-postgres17"
+  family = "postgres17"
 
   parameter {
     name  = "rds.force_ssl"

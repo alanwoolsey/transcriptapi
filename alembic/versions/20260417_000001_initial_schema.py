@@ -201,7 +201,7 @@ def upgrade() -> None:
         sa.Column("source", sa.Text(), nullable=True),
         sa.Column("is_verified", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column("created_at", sa.TIMESTAMP(timezone=True), nullable=False, server_default=sa.text("now()")),
-        sa.UniqueConstraint("tenant_id", "identifier_type", "identifier_value", name="uq_student_identifiers_tenant_id_identifier_type_identifier_value"),
+        sa.UniqueConstraint("tenant_id", "identifier_type", "identifier_value", name="uq_student_identifiers_lookup"),
     )
 
     op.create_table(

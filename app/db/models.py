@@ -136,7 +136,7 @@ Index(
 
 class StudentIdentifier(Base):
     __tablename__ = "student_identifiers"
-    __table_args__ = (UniqueConstraint("tenant_id", "identifier_type", "identifier_value", name="uq_student_identifiers_tenant_id_identifier_type_identifier_value"),)
+    __table_args__ = (UniqueConstraint("tenant_id", "identifier_type", "identifier_value", name="uq_student_identifiers_lookup"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
