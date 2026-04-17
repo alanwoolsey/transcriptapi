@@ -127,3 +127,23 @@ The Textract permission scope is intentionally full because you asked for full T
 ## Cost note
 
 This stack uses one NAT gateway so private Fargate tasks can reach ECR, CloudWatch, Bedrock, and Textract. That is the standard layout here, but it does add steady hourly cost.
+
+## GitHub Actions deployment
+
+The repo now includes [`.github/workflows/deploy.yml`](c:/alan/transcriptapi/.github/workflows/deploy.yml), which does the following on pushes to `main` or manual dispatch:
+
+- Applies Terraform only when files under `infra/terraform/` changed
+- Builds and pushes the app container only when `app/`, `Dockerfile`, or `requirements.txt` changed
+- Forces an ECS rolling deployment after a new image is pushed
+
+It uses the two repository secrets you already created:
+
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+
+The workflow also bootstraps and uses an S3 backend and DynamoDB lock table automatically:
+
+- S3 bucket: `transcriptapi-terraform-state-<account-id>-us-east-1`
+- DynamoDB table: `transcriptapi-terraform-locks`
+
+That keeps Terraform state out of the GitHub runner filesystem and avoids repeated attempts to recreate the stack from scratch.
