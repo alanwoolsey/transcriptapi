@@ -147,9 +147,7 @@ It uses the two repository secrets you already created:
 - `AWS_ACCESS_KEY_ID`
 - `AWS_SECRET_ACCESS_KEY`
 
-The workflow also bootstraps and uses an S3 backend and DynamoDB lock table automatically:
+The workflow also bootstraps and uses an S3 backend automatically:
 
 - S3 bucket: `transcriptapi-terraform-state-<account-id>-us-east-1`
-- DynamoDB table: `transcriptapi-terraform-locks`
-
-That keeps Terraform state out of the GitHub runner filesystem and avoids repeated attempts to recreate the stack from scratch.
+That keeps Terraform state out of the GitHub runner filesystem and avoids repeated attempts to recreate the stack from scratch. GitHub Actions `concurrency` prevents overlapping deploys.
