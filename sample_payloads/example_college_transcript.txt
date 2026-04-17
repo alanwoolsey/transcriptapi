@@ -1,0 +1,14 @@
+Example State University
+Official Transcript
+Student Name: Jane Smith
+Student ID: 123456
+DOB: 01/15/2004
+
+Fall 2024
+ENG101 English Composition 3 A
+MATH120 College Algebra 3 B+
+HIST110 US History 3 A-
+
+Cumulative GPA 3.76
+Credits Attempted 62
+Credits Earned 59

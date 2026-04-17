@@ -1,0 +1,13 @@
+Example High School
+Transcript
+Name: John Doe
+ID: HS-99881
+Graduation Date: 05/15/2025
+Weighted GPA 3.95
+Unweighted GPA 3.72
+Class Rank: 12/240
+
+Fall 2024
+ENG101 English IV 1 A
+MATH201 Algebra II 1 A-
+SCI110 Biology 1 B+

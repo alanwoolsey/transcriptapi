@@ -1,0 +1,16 @@
+aws_region      = "us-east-1"
+project_name    = "transcriptapi"
+service_name    = "transcriptservice"
+domain_name     = "transcriptservice.crtfystudent.com"
+ecr_image_tag   = "latest"
+desired_count   = 1
+app_env         = "prod"
+use_bedrock     = true
+use_textract    = true
+bedrock_model_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+# First apply:
+# - leave existing_certificate_arn as null
+# - leave certificate_validation_record_fqdns empty
+existing_certificate_arn              = null
+certificate_validation_record_fqdns   = []

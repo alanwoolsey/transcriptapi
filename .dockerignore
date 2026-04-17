@@ -1,0 +1,15 @@
+.git
+.gitignore
+.pytest_cache
+.venv
+__pycache__
+tests
+sample_payloads
+.terraform
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.*
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.md
