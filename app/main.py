@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router as transcript_router
 from app.core.config import settings
+from app.db import run_migrations
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +25,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def startup() -> None:
+    run_migrations()
 
 
 @app.get("/health")

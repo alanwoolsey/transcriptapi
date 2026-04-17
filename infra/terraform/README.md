@@ -7,6 +7,8 @@ This Terraform stack creates:
 - An ECS cluster and Fargate service
 - An ECR repository for the container image
 - CloudWatch logging
+- An RDS PostgreSQL instance in private subnets
+- A Secrets Manager secret for the application database connection
 - IAM roles for ECS execution and the app task
 - Bedrock inference permissions for the app task
 - Full Textract permissions for the app task
@@ -18,6 +20,7 @@ This Terraform stack creates:
 - DNS is hosted in GoDaddy, not Route 53
 - The app runs as a single container on port `8000`
 - You will build and push the Docker image to ECR
+- Alembic migrations run automatically on application startup once the database exists
 
 ## Files
 
@@ -52,6 +55,7 @@ After apply, inspect these outputs:
 terraform output acm_validation_records
 terraform output alb_dns_name
 terraform output ecr_repository_url
+terraform output database_endpoint
 ```
 
 ## 4. Add GoDaddy DNS records
@@ -126,7 +130,9 @@ The Textract permission scope is intentionally full because you asked for full T
 
 ## Cost note
 
-This stack uses one NAT gateway so private Fargate tasks can reach ECR, CloudWatch, Bedrock, and Textract. That is the standard layout here, but it does add steady hourly cost.
+This stack uses one NAT gateway so private Fargate tasks can reach ECR, CloudWatch, Bedrock, Textract, and Secrets Manager. That is the standard layout here, but it does add steady hourly cost.
+
+The database runs on RDS PostgreSQL in private subnets and accepts traffic only from the ECS service security group. The ECS task receives `DATABASE_SECRET_JSON` from Secrets Manager and uses it to connect and apply Alembic migrations automatically on startup.
 
 ## GitHub Actions deployment
 

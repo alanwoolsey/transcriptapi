@@ -33,6 +33,21 @@ output "certificate_arn" {
   value       = local.listener_certificate_arn
 }
 
+output "database_endpoint" {
+  description = "RDS PostgreSQL endpoint hostname."
+  value       = aws_db_instance.postgres.address
+}
+
+output "database_name" {
+  description = "Application database name."
+  value       = var.db_name
+}
+
+output "database_secret_arn" {
+  description = "Secrets Manager ARN containing the application database connection payload."
+  value       = aws_secretsmanager_secret.database.arn
+}
+
 output "acm_validation_records" {
   description = "DNS validation records to create manually in GoDaddy when using the managed ACM certificate."
   value = local.create_acm_certificate ? [

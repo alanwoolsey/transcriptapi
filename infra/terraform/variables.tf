@@ -119,6 +119,60 @@ variable "log_retention_days" {
   default     = 30
 }
 
+variable "db_name" {
+  description = "Application PostgreSQL database name."
+  type        = string
+  default     = "crtfystudent"
+}
+
+variable "db_username" {
+  description = "Master username for the PostgreSQL instance."
+  type        = string
+  default     = "crtfy_app"
+}
+
+variable "db_instance_class" {
+  description = "RDS instance class."
+  type        = string
+  default     = "db.t4g.small"
+}
+
+variable "db_allocated_storage" {
+  description = "Initial allocated storage in GB."
+  type        = number
+  default     = 20
+}
+
+variable "db_max_allocated_storage" {
+  description = "Autoscaling storage ceiling in GB."
+  type        = number
+  default     = 100
+}
+
+variable "db_backup_retention_period" {
+  description = "Automated backup retention in days."
+  type        = number
+  default     = 7
+}
+
+variable "db_multi_az" {
+  description = "Whether the RDS instance should be Multi-AZ."
+  type        = bool
+  default     = false
+}
+
+variable "db_deletion_protection" {
+  description = "Whether to protect the RDS instance from deletion."
+  type        = bool
+  default     = false
+}
+
+variable "db_skip_final_snapshot" {
+  description = "Whether to skip the final snapshot when destroying the database."
+  type        = bool
+  default     = true
+}
+
 variable "tags" {
   description = "Additional tags to apply to resources."
   type        = map(string)
