@@ -1,7 +1,5 @@
 from pathlib import Path
 
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import text
 
 from app.core.config import settings
@@ -14,6 +12,9 @@ def run_migrations() -> None:
     database_url = get_database_url()
     if not database_url or not settings.run_db_migrations_on_startup:
         return
+
+    from alembic import command
+    from alembic.config import Config
 
     engine = get_engine()
     config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))

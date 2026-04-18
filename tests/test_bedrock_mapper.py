@@ -1,5 +1,7 @@
+import pytest
+
 from app.core.config import settings
-from app.services.bedrock_mapper import BEDROCK_FALLBACK_MODEL_ID, BedrockMapper
+from app.services.bedrock_mapper import BEDROCK_FALLBACK_MODEL_ID, BedrockMapper, BedrockResponseFormatError
 
 
 class FakeClientError(Exception):
@@ -102,3 +104,50 @@ def test_bedrock_mapper_retries_with_inference_profile_on_validation_error():
 
     assert client.calls == ["anthropic.claude-sonnet-4-6", BEDROCK_FALLBACK_MODEL_ID]
     assert payload["document_type"] == "college_transcript"
+
+
+def test_bedrock_mapper_raises_format_error_for_malformed_json():
+    mapper = BedrockMapper()
+
+    with pytest.raises(BedrockResponseFormatError):
+        mapper._extract_json('{"document_type":"high_school_transcript","student":{"name":"Jane "Smith"}}')
+
+
+class ProposalBedrockClient:
+    def __init__(self):
+        self.calls = []
+
+    def converse(self, modelId: str, messages: list[dict], inferenceConfig: dict):
+        self.calls.append(modelId)
+        return {
+            "output": {
+                "message": {
+                    "content": [
+                        {
+                            "text": '{"family_id":"example_family_v1","version":1,"status":"candidate","match":{"all":[{"contains":"Official Transcript"},{"contains":"Parchment Student ID:"}]},"strategy":{"document_type":"high_school_transcript","python_parser_fallback":true,"notes":["Low confidence heuristic parse."]},"field_hints":{"institution_name":"Example High School","student_name_example":"Jane Smith","student_id_example":"123456","date_of_birth_example":null}}'
+                        }
+                    ]
+                }
+            }
+        }
+
+
+def test_bedrock_mapper_can_propose_heuristic_rule_json():
+    client = ProposalBedrockClient()
+    mapper = BedrockMapper(client=client)
+
+    payload = mapper.propose_heuristic_rule(
+        text="Official Transcript\nParchment Student ID: 123456",
+        heuristic_result={"document_type": "high_school_transcript", "student": {}, "institutions": [], "academic_summary": {}, "terms": []},
+        repaired_result={
+            "document_type": "high_school_transcript",
+            "student": {"name": "Jane Smith", "student_id": "123456", "date_of_birth": None},
+            "institutions": [{"name": "Example High School", "type": "high_school"}],
+            "academic_summary": {},
+            "terms": [],
+        },
+    )
+
+    assert client.calls
+    assert payload["family_id"] == "example_family_v1"
+    assert payload["strategy"]["python_parser_fallback"] is True

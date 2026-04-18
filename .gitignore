@@ -26,6 +26,7 @@ dist/
 # Environment and local config
 .env
 .env.*
+.heuristics/
 
 # IDE and OS files
 .vscode/

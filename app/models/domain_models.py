@@ -20,6 +20,8 @@ class TranscriptCourse:
     credits: Optional[float]
     grade: Optional[str]
     term: Optional[str] = None
+    confidence_score: float = 0.0
+    confidence_reasons: List[str] = field(default_factory=list)
 
 
 @dataclass

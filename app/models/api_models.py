@@ -166,3 +166,17 @@ class ParseTranscriptResponse(BaseModel):
     isFraudulent: bool = False
     fraudFlaggedAt: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class BatchParseTranscriptItem(BaseModel):
+    filename: str
+    success: bool = False
+    result: Optional[ParseTranscriptResponse] = None
+    error: Optional[str] = None
+
+
+class BatchParseTranscriptResponse(BaseModel):
+    totalFiles: int = 0
+    processedFiles: int = 0
+    failedFiles: int = 0
+    items: List[BatchParseTranscriptItem] = Field(default_factory=list)

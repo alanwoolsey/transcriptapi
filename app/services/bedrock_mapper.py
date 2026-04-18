@@ -9,6 +9,10 @@ logger = logging.getLogger(__name__)
 BEDROCK_FALLBACK_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
+class BedrockResponseFormatError(ValueError):
+    pass
+
+
 class BedrockMapper:
     def __init__(self, client=None):
         self.client = client
@@ -20,21 +24,27 @@ class BedrockMapper:
 
     def refine(self, text: str, heuristic_result: Dict[str, Any]) -> Dict[str, Any]:
         prompt = self._build_prompt(text=text, heuristic_result=heuristic_result)
+        return self._invoke_json_prompt(prompt=prompt, log_label="transcript refinement")
+
+    def propose_heuristic_rule(self, text: str, heuristic_result: Dict[str, Any], repaired_result: Dict[str, Any]) -> Dict[str, Any]:
+        prompt = self._build_rule_prompt(text=text, heuristic_result=heuristic_result, repaired_result=repaired_result)
+        return self._invoke_json_prompt(prompt=prompt, log_label="heuristic rule proposal")
+
+    def _invoke_json_prompt(self, prompt: str, log_label: str) -> Dict[str, Any]:
         model_id = settings.bedrock_model_id
         logger.info(
-            "Calling Bedrock model=%s transcript_chars=%s heuristic_terms=%s",
+            "Calling Bedrock model=%s for %s",
             model_id,
-            len(text),
-            len(heuristic_result.get("terms", [])),
+            log_label,
         )
         try:
             response = self._converse(model_id=model_id, prompt=prompt)
             output_text = response["output"]["message"]["content"][0]["text"]
             payload = self._extract_json(output_text)
             logger.info(
-                "Bedrock response parsed successfully output_chars=%s returned_terms=%s",
+                "Bedrock %s parsed successfully output_chars=%s",
+                log_label,
                 len(output_text),
-                len(payload.get("terms", [])),
             )
             return payload
         except Exception as exc:
@@ -48,9 +58,9 @@ class BedrockMapper:
                 output_text = response["output"]["message"]["content"][0]["text"]
                 payload = self._extract_json(output_text)
                 logger.info(
-                    "Bedrock fallback response parsed successfully output_chars=%s returned_terms=%s",
+                    "Bedrock fallback %s parsed successfully output_chars=%s",
+                    log_label,
                     len(output_text),
-                    len(payload.get("terms", [])),
                 )
                 return payload
             logger.exception("Bedrock call failed")
@@ -132,6 +142,51 @@ Transcript text:
 {text[:18000]}
 """.strip()
 
+    def _build_rule_prompt(self, text: str, heuristic_result: Dict[str, Any], repaired_result: Dict[str, Any]) -> str:
+        return f"""
+You are proposing a JSON heuristic candidate for a transcript parser.
+Only return valid JSON. Do not wrap it in markdown.
+The candidate must be conservative and declarative. It is not executable code.
+It will be validated later against a regression corpus before promotion.
+
+Return this schema only:
+{{
+  "family_id": string,
+  "version": 1,
+  "status": "candidate",
+  "match": {{
+    "all": [{{"contains": string}}]
+  }},
+  "strategy": {{
+    "document_type": "college_transcript|high_school_transcript|unknown",
+    "python_parser_fallback": true,
+    "notes": [string]
+  }},
+  "field_hints": {{
+    "institution_name": string|null,
+    "student_name_example": string|null,
+    "student_id_example": string|null,
+    "date_of_birth_example": string|null
+  }}
+}}
+
+Rules:
+- Include 2 to 4 stable match conditions from the transcript header.
+- Avoid personal identifiers in match conditions unless they are institution-level boilerplate.
+- Prefer institution names, vendor markers, and durable layout labels.
+- Keep python_parser_fallback=true.
+- Notes should briefly explain why the deterministic parser missed this family.
+
+Heuristic result before AI repair:
+{json.dumps(heuristic_result, indent=2)}
+
+Repaired result returned to the caller:
+{json.dumps(repaired_result, indent=2)}
+
+Transcript text:
+{text[:12000]}
+""".strip()
+
     def _extract_json(self, raw_text: str) -> Dict[str, Any]:
         raw_text = raw_text.strip()
         if raw_text.startswith("```"):
@@ -140,5 +195,14 @@ Transcript text:
         start = raw_text.find("{")
         end = raw_text.rfind("}")
         if start == -1 or end == -1:
-            raise ValueError("Bedrock response did not contain JSON.")
-        return json.loads(raw_text[start : end + 1])
+            raise BedrockResponseFormatError("Bedrock response did not contain JSON.")
+        try:
+            return json.loads(raw_text[start : end + 1])
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "Bedrock returned malformed JSON at line=%s column=%s position=%s",
+                exc.lineno,
+                exc.colno,
+                exc.pos,
+            )
+            raise BedrockResponseFormatError(f"Bedrock returned malformed JSON: {exc}") from exc

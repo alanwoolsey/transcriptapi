@@ -2,9 +2,9 @@ import re
 from typing import Iterable, List
 
 
-GRADE_PATTERN = re.compile(r"^(A\+?|A-|B\+?|B-|C\+?|C-|D\+?|D-|F|P|NP|S|U|W|I|IP|CR|NC)$", re.IGNORECASE)
+GRADE_PATTERN = re.compile(r"^(A\+?|A-|B\+?|B-|C\+?|C-|D\+?|D-|F|P|NP|S|U|W|I|IP|CR|NC|TR|PR)$", re.IGNORECASE)
 TERM_PATTERN = re.compile(
-    r"\b(Spring|Summer|Fall|Winter)\s+(19|20)\d{2}\b|\b(19|20)\d{2}\s+(Spring|Summer|Fall|Winter)\b",
+    r"\b(Spring|Summer|Fall|Winter|Spng)(?:\s+(?:I|II|III|IV))?\s+(19|20)\d{2}\b|\b(19|20)\d{2}\s+(Spring|Summer|Fall|Winter|Spng)(?:\s+(?:I|II|III|IV))?\b",
     re.IGNORECASE,
 )
 
@@ -39,3 +39,7 @@ def find_first_matching_line(text_lines: Iterable[str], pattern: re.Pattern[str]
         if pattern.search(line):
             return line
     return None
+
+
+def normalize_for_match(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (text or "").lower())

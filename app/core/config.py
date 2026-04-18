@@ -1,5 +1,6 @@
 import json
 from urllib.parse import quote_plus
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -20,6 +21,11 @@ class Settings(BaseSettings):
     heuristic_min_alpha_ratio: float = 0.55
     heuristic_min_line_count: int = 8
     heuristic_min_score: float = 0.65
+    heuristic_parse_min_confidence: float = 0.75
+    heuristic_course_min_confidence: float = 0.7
+    heuristic_overall_min_confidence: float = 0.72
+    heuristic_learning_enabled: bool = False
+    heuristic_learning_dir: str = ".heuristics"
     max_upload_mb: int = 15
     database_url: str | None = None
     database_secret_json: str | None = None
@@ -58,3 +64,7 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def heuristic_learning_path() -> Path:
+    return Path(settings.heuristic_learning_dir).resolve()
