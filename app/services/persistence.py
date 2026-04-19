@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -31,6 +32,96 @@ class TranscriptPersistenceService:
     def is_enabled(self) -> bool:
         return bool(get_database_url())
 
+    def create_processing_upload(
+        self,
+        filename: str,
+        content: bytes,
+        content_type: str | None,
+        requested_document_type: str,
+        use_bedrock: bool,
+        tenant_id: str,
+        uploaded_by_user_id: UUID | None = None,
+    ) -> dict[str, str]:
+        if not self.is_enabled():
+            raise ValueError("Database is not configured.")
+
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            with session.begin():
+                tenant = self._get_tenant(session, tenant_id)
+                now = datetime.now(timezone.utc)
+                checksum = hashlib.sha256(content).hexdigest()
+
+                upload = DocumentUpload(
+                    tenant_id=tenant.id,
+                    uploaded_by_user_id=uploaded_by_user_id,
+                    original_filename=filename,
+                    mime_type=content_type or "application/octet-stream",
+                    file_size_bytes=len(content),
+                    storage_bucket="direct-upload",
+                    storage_key=f"pending/{self._slugify(filename)}",
+                    checksum_sha256=checksum,
+                    upload_status="processing",
+                    uploaded_at=now,
+                )
+                session.add(upload)
+                session.flush()
+
+                transcript = Transcript(
+                    tenant_id=tenant.id,
+                    document_upload_id=upload.id,
+                    student_id=None,
+                    source_institution_id=None,
+                    document_type=requested_document_type or "auto",
+                    status="processing",
+                    is_official=False,
+                    is_finalized=False,
+                    finalized_at=None,
+                    finalized_by_user_id=None,
+                    is_fraudulent=False,
+                    fraud_flagged_at=None,
+                    matched_at=None,
+                    matched_by=None,
+                    parser_confidence=None,
+                    page_count=None,
+                    notes=None,
+                )
+                session.add(transcript)
+                session.flush()
+
+                upload.storage_key = f"{transcript.id}/{self._slugify(filename)}"
+
+                parse_run = TranscriptParseRun(
+                    tenant_id=tenant.id,
+                    transcript_id=transcript.id,
+                    parser_name="transcript_pipeline",
+                    parser_version="v1",
+                    request_json={
+                        "filename": filename,
+                        "content_type": content_type,
+                        "requested_document_type": requested_document_type,
+                        "use_bedrock": use_bedrock,
+                    },
+                    response_json=None,
+                    raw_text_excerpt=None,
+                    warnings_json=[],
+                    confidence_score=None,
+                    started_at=now,
+                    completed_at=None,
+                    status="processing",
+                    error_message=None,
+                )
+                session.add(parse_run)
+                session.flush()
+
+            return {
+                "tenantId": str(tenant.id),
+                "documentUploadId": str(upload.id),
+                "transcriptId": str(transcript.id),
+                "parseRunId": str(parse_run.id),
+                "status": transcript.status,
+            }
+
     def persist_upload(
         self,
         filename: str,
@@ -39,6 +130,7 @@ class TranscriptPersistenceService:
         requested_document_type: str,
         use_bedrock: bool,
         response_payload: dict[str, Any],
+        tenant_id: str,
     ) -> dict[str, str]:
         if not self.is_enabled():
             return {}
@@ -47,7 +139,7 @@ class TranscriptPersistenceService:
         session_factory = self.session_factory()
         with session_factory() as session:
             with session.begin():
-                tenant = self._ensure_default_tenant(session)
+                tenant = self._get_tenant(session, tenant_id)
                 institution = self._find_or_create_institution(session, tenant.id, parsed.demographic.institutionName)
                 now = datetime.now(timezone.utc)
                 checksum = hashlib.sha256(content).hexdigest()
@@ -164,14 +256,195 @@ class TranscriptPersistenceService:
                 "parseRunId": str(parse_run.id),
             }
 
-    def _ensure_default_tenant(self, session: Session) -> Tenant:
-        tenant = session.query(Tenant).filter(Tenant.slug == "default").one_or_none()
-        if tenant:
-            return tenant
-        tenant = Tenant(name="Default Tenant", slug="default", status="active", primary_region=None, data_retention_days=None)
-        session.add(tenant)
-        session.flush()
+    def complete_processing_upload(
+        self,
+        transcript_id: str,
+        response_payload: dict[str, Any],
+        tenant_id: str,
+    ) -> dict[str, str]:
+        if not self.is_enabled():
+            raise ValueError("Database is not configured.")
+
+        parsed = ParseTranscriptResponse(**response_payload)
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            with session.begin():
+                tenant = self._get_tenant(session, tenant_id)
+                transcript = self._get_transcript(session, transcript_id, tenant.id)
+                upload = session.get(DocumentUpload, transcript.document_upload_id)
+                parse_run = self._get_latest_parse_run(session, transcript.id, tenant.id)
+                institution = self._find_or_create_institution(session, tenant.id, parsed.demographic.institutionName)
+                now = datetime.now(timezone.utc)
+
+                transcript.source_institution_id = institution.id if institution else None
+                transcript.document_type = parsed.metadata.get("document_type") or transcript.document_type
+                transcript.status = "completed"
+                transcript.is_official = parsed.isOfficial
+                transcript.is_finalized = parsed.isFinalized
+                transcript.finalized_at = self._parse_datetime(parsed.finalizedAt)
+                transcript.is_fraudulent = parsed.isFraudulent
+                transcript.fraud_flagged_at = self._parse_datetime(parsed.fraudFlaggedAt)
+                transcript.parser_confidence = self._to_decimal(parsed.metadata.get("parser_confidence"))
+                transcript.page_count = self._page_count(parsed)
+
+                upload.upload_status = "completed"
+
+                parse_run.response_json = parsed.model_dump(mode="json")
+                parse_run.raw_text_excerpt = str(parsed.metadata.get("raw_text_excerpt") or "")
+                parse_run.warnings_json = list(parsed.metadata.get("warnings") or [])
+                parse_run.confidence_score = self._to_decimal(parsed.metadata.get("overall_confidence"))
+                parse_run.completed_at = now
+                parse_run.status = "completed"
+                parse_run.error_message = None
+
+                demographics = TranscriptDemographics(
+                    tenant_id=tenant.id,
+                    transcript_id=transcript.id,
+                    student_first_name=self._empty_to_none(parsed.demographic.firstName),
+                    student_middle_name=self._empty_to_none(parsed.demographic.middleName),
+                    student_last_name=self._empty_to_none(parsed.demographic.lastName),
+                    student_external_id=self._empty_to_none(parsed.demographic.studentId),
+                    date_of_birth=self._parse_date(parsed.demographic.dateOfBirth),
+                    institution_name=self._empty_to_none(parsed.demographic.institutionName),
+                    institution_city=self._empty_to_none(parsed.demographic.institutionCity),
+                    institution_state=self._empty_to_none(parsed.demographic.institutionState),
+                    institution_postal_code=self._empty_to_none(parsed.demographic.institutionPostalCode),
+                    institution_country=self._empty_to_none(parsed.demographic.institutionCountry),
+                    cumulative_gpa=self._to_decimal(parsed.demographic.cumulativeGpa),
+                    weighted_gpa=self._to_decimal(parsed.demographic.weightedGpa),
+                    unweighted_gpa=self._to_decimal(parsed.demographic.unweightedGpa),
+                    total_credits_attempted=self._to_decimal(parsed.demographic.totalCreditsAttempted),
+                    total_credits_earned=self._to_decimal(parsed.demographic.totalCreditsEarned),
+                    total_grade_points=self._to_decimal(parsed.demographic.totalGradePoints),
+                    degree_awarded=self._empty_to_none(parsed.demographic.degreeAwarded),
+                    graduation_date=self._parse_date(parsed.demographic.graduationDate),
+                    is_official=parsed.isOfficial,
+                )
+                session.add(demographics)
+
+                gpa_summary = TranscriptGpaSummary(
+                    tenant_id=tenant.id,
+                    transcript_id=transcript.id,
+                    units_earned=self._to_decimal(parsed.grandGPA.unitsEarned),
+                    simple_gpa_points=self._to_decimal(parsed.grandGPA.simpleGPA),
+                    cumulative_gpa=self._to_decimal(parsed.grandGPA.cumulativeGPA),
+                    weighted_gpa=self._to_decimal(parsed.grandGPA.weightedGPA),
+                )
+                session.add(gpa_summary)
+
+                term_lookup = self._persist_terms(session, tenant_id=tenant.id, transcript_id=transcript.id, parsed=parsed)
+                self._persist_courses(
+                    session,
+                    tenant_id=tenant.id,
+                    transcript_id=transcript.id,
+                    source_institution_id=institution.id if institution else None,
+                    parsed=parsed,
+                    term_lookup=term_lookup,
+                )
+                self._persist_audit_events(session, tenant_id=tenant.id, transcript_id=transcript.id, parsed=parsed)
+
+            return {
+                "tenantId": str(tenant.id),
+                "documentUploadId": str(upload.id),
+                "transcriptId": str(transcript.id),
+                "parseRunId": str(parse_run.id),
+            }
+
+    def fail_processing_upload(self, transcript_id: str, tenant_id: str, error_message: str) -> None:
+        if not self.is_enabled():
+            raise ValueError("Database is not configured.")
+
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            with session.begin():
+                tenant = self._get_tenant(session, tenant_id)
+                transcript = self._get_transcript(session, transcript_id, tenant.id)
+                upload = session.get(DocumentUpload, transcript.document_upload_id)
+                parse_run = self._get_latest_parse_run(session, transcript.id, tenant.id)
+
+                transcript.status = "failed"
+                transcript.notes = error_message
+                upload.upload_status = "failed"
+                parse_run.status = "failed"
+                parse_run.completed_at = datetime.now(timezone.utc)
+                parse_run.error_message = error_message
+
+    def get_transcript_status(self, transcript_id: str, tenant_id: str) -> dict[str, Any]:
+        if not self.is_enabled():
+            raise ValueError("Database is not configured.")
+
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            tenant = self._get_tenant(session, tenant_id)
+            transcript = self._get_transcript(session, transcript_id, tenant.id)
+            upload = session.get(DocumentUpload, transcript.document_upload_id)
+            parse_run = self._get_latest_parse_run(session, transcript.id, tenant.id)
+            status = parse_run.status if parse_run else transcript.status
+            return {
+                "transcriptId": str(transcript.id),
+                "documentUploadId": str(upload.id),
+                "parseRunId": str(parse_run.id) if parse_run else None,
+                "status": status,
+                "error": parse_run.error_message if parse_run else None,
+                "completed": status == "completed",
+            }
+
+    def get_transcript_result(self, transcript_id: str, tenant_id: str) -> dict[str, Any]:
+        if not self.is_enabled():
+            raise ValueError("Database is not configured.")
+
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            tenant = self._get_tenant(session, tenant_id)
+            transcript = self._get_transcript(session, transcript_id, tenant.id)
+            parse_run = self._get_latest_parse_run(session, transcript.id, tenant.id)
+
+            if parse_run is None or parse_run.status != "completed" or not parse_run.response_json:
+                raise ValueError("Transcript result is not ready.")
+
+            return parse_run.response_json
+
+    def _get_tenant(self, session: Session, tenant_id: str) -> Tenant:
+        try:
+            resolved_tenant_id = UUID(str(tenant_id))
+        except ValueError as exc:
+            raise ValueError("A valid tenant_id is required for persistence.") from exc
+
+        tenant = (
+            session.query(Tenant)
+            .filter(Tenant.id == resolved_tenant_id, Tenant.status == "active")
+            .one_or_none()
+        )
+        if tenant is None:
+            raise ValueError("Tenant not found.")
         return tenant
+
+    def _get_transcript(self, session: Session, transcript_id: str, tenant_id: UUID) -> Transcript:
+        try:
+            resolved_transcript_id = UUID(str(transcript_id))
+        except ValueError as exc:
+            raise ValueError("A valid transcript_id is required.") from exc
+
+        transcript = (
+            session.query(Transcript)
+            .filter(Transcript.id == resolved_transcript_id, Transcript.tenant_id == tenant_id)
+            .one_or_none()
+        )
+        if transcript is None:
+            raise ValueError("Transcript not found.")
+        return transcript
+
+    def _get_latest_parse_run(self, session: Session, transcript_id: UUID, tenant_id: UUID) -> TranscriptParseRun | None:
+        stmt = (
+            select(TranscriptParseRun)
+            .where(
+                TranscriptParseRun.transcript_id == transcript_id,
+                TranscriptParseRun.tenant_id == tenant_id,
+            )
+            .order_by(TranscriptParseRun.started_at.desc())
+            .limit(1)
+        )
+        return session.execute(stmt).scalar_one_or_none()
 
     def _find_or_create_institution(self, session: Session, tenant_id: UUID, institution_name: str) -> Institution | None:
         if not institution_name.strip():

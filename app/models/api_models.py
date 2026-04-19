@@ -180,3 +180,19 @@ class BatchParseTranscriptResponse(BaseModel):
     processedFiles: int = 0
     failedFiles: int = 0
     items: List[BatchParseTranscriptItem] = Field(default_factory=list)
+
+
+class StartTranscriptUploadResponse(BaseModel):
+    transcriptId: str
+    documentUploadId: str
+    parseRunId: str
+    status: str
+
+
+class TranscriptUploadStatusResponse(BaseModel):
+    transcriptId: str
+    documentUploadId: str
+    parseRunId: Optional[str] = None
+    status: str
+    error: Optional[str] = None
+    completed: bool = False
