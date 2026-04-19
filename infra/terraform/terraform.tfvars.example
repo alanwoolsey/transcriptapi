@@ -1,6 +1,6 @@
 aws_region      = "us-east-1"
-cognito_user_pool_id  = "us-east-2_I7NQyTlzG"
-cognito_app_client_id = "2ibvprucdi1uve0nl33b91336o"
+cognito_user_pool_id  = "us-east-1_QzbkX105v"
+cognito_app_client_id = "9j409k1g1kgu67qq2t4ii86rt"
 project_name    = "transcriptapi"
 service_name    = "transcriptservice"
 domain_name     = "transcriptservice.crtfystudent.com"

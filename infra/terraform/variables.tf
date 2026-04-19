@@ -7,11 +7,13 @@ variable "aws_region" {
 variable "cognito_user_pool_id" {
   description = "Shared Cognito user pool ID for auth."
   type        = string
+  default     = "us-east-1_QzbkX105v"
 }
 
 variable "cognito_app_client_id" {
   description = "Shared Cognito app client ID for auth."
   type        = string
+  default     = "9j409k1g1kgu67qq2t4ii86rt"
 }
 
 variable "project_name" {
