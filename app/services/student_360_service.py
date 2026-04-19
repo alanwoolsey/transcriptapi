@@ -19,6 +19,7 @@ from app.models.student_models import (
     StudentTranscriptCourse,
     StudentTranscriptRecord,
 )
+from app.services.student_resolution import StudentResolutionService
 
 
 @dataclass
@@ -32,10 +33,12 @@ class _TranscriptBundle:
 class Student360Service:
     def __init__(self, session_factory=None) -> None:
         self.session_factory = session_factory or get_session_factory
+        self.student_resolution = StudentResolutionService()
 
     def list_students(self, tenant_id: UUID, q: str | None = None) -> list[Student360Record]:
         session_factory = self.session_factory()
         with session_factory() as session:
+            self._heal_transcript_data(session, tenant_id)
             canonical_students = self._list_canonical_students(session, tenant_id, q)
             if canonical_students:
                 return canonical_students
@@ -158,6 +161,39 @@ class Student360Service:
             if transcript.student_id:
                 grouped[transcript.student_id].append(_TranscriptBundle(transcript, upload, demographics, parse_run))
         return {student_id: self._map_transcript_records(bundles) for student_id, bundles in grouped.items()}
+
+    def _heal_transcript_data(self, session: Session, tenant_id: UUID) -> None:
+        stmt = (
+            select(Transcript, TranscriptDemographics, TranscriptParseRun)
+            .outerjoin(TranscriptDemographics, TranscriptDemographics.transcript_id == Transcript.id)
+            .outerjoin(TranscriptParseRun, TranscriptParseRun.transcript_id == Transcript.id)
+            .where(Transcript.tenant_id == tenant_id)
+            .order_by(Transcript.created_at.desc())
+        )
+        changed = False
+        for transcript, demographics, parse_run in session.execute(stmt).all():
+            previous_student_id = transcript.student_id
+            student = self.student_resolution.ensure_student_for_transcript(
+                session=session,
+                tenant_id=tenant_id,
+                transcript=transcript,
+                demographics=demographics,
+            )
+            if student is not None and transcript.student_id != previous_student_id:
+                changed = True
+
+            payload = parse_run.response_json if parse_run and parse_run.response_json else {}
+            raw_courses = payload.get("courses") or []
+            if transcript.status == "completed" and not raw_courses:
+                transcript.status = "failed"
+                transcript.notes = "No courses were extracted from transcript. Reprocess required."
+                if parse_run is not None:
+                    parse_run.status = "failed"
+                    parse_run.error_message = transcript.notes
+                changed = True
+
+        if changed:
+            session.commit()
 
     def _map_transcript_records(self, bundles: list[_TranscriptBundle]) -> list[StudentTranscriptRecord]:
         records: list[StudentTranscriptRecord] = []
@@ -366,8 +402,12 @@ class Student360Service:
 
     def _demographic_name(self, demographics: TranscriptDemographics | None) -> str:
         if not demographics:
-            return "Unknown Student"
-        return self._join_name(demographics.student_first_name, demographics.student_last_name, fallback="Unknown Student")
+            return "Student record pending"
+        if demographics.student_external_id:
+            fallback = demographics.student_external_id
+        else:
+            fallback = "Student record pending"
+        return self._join_name(demographics.student_first_name, demographics.student_last_name, fallback=fallback)
 
     def _join_name(self, first: str | None, last: str | None, fallback: str) -> str:
         name = " ".join(part for part in [first or "", last or ""] if part.strip()).strip()

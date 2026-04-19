@@ -13,6 +13,7 @@ app_env         = "prod"
 use_bedrock     = true
 use_textract    = true
 bedrock_model_id = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+upload_batch_max_workers = 20
 db_name         = "crtfystudent"
 db_username     = "crtfy_app"
 db_instance_class = "db.t4g.small"

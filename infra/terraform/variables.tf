@@ -121,6 +121,12 @@ variable "bedrock_model_id" {
   default     = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 }
 
+variable "upload_batch_max_workers" {
+  description = "Maximum number of transcript files to process concurrently within a ZIP batch."
+  type        = number
+  default     = 20
+}
+
 variable "health_check_path" {
   description = "ALB target group health check path."
   type        = string

@@ -15,6 +15,9 @@ from app.db.models import (
     Institution,
     Tenant,
     Transcript,
+    TranscriptProcessingFailure,
+    TranscriptUploadBatch,
+    TranscriptUploadBatchItem,
     TranscriptCourse,
     TranscriptDemographics,
     TranscriptGpaSummary,
@@ -23,11 +26,13 @@ from app.db.models import (
 )
 from app.db.session import get_database_url, get_session_factory
 from app.models.api_models import ParseTranscriptResponse
+from app.services.student_resolution import StudentResolutionService
 
 
 class TranscriptPersistenceService:
     def __init__(self, session_factory=None):
         self.session_factory = session_factory or get_session_factory
+        self.student_resolution = StudentResolutionService()
 
     def is_enabled(self) -> bool:
         return bool(get_database_url())
@@ -122,6 +127,75 @@ class TranscriptPersistenceService:
                 "status": transcript.status,
             }
 
+    def create_processing_upload_batch(
+        self,
+        files: list[dict[str, Any]],
+        requested_document_type: str,
+        use_bedrock: bool,
+        tenant_id: str,
+        uploaded_by_user_id: UUID | None = None,
+        original_filename: str = "batch.zip",
+    ) -> dict[str, Any]:
+        if not self.is_enabled():
+            raise ValueError("Database is not configured.")
+        if not files:
+            raise ValueError("ZIP archive did not contain any supported transcript files.")
+
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            with session.begin():
+                tenant = self._get_tenant(session, tenant_id)
+                batch = TranscriptUploadBatch(
+                    tenant_id=tenant.id,
+                    uploaded_by_user_id=uploaded_by_user_id,
+                    original_filename=original_filename,
+                    file_count=len(files),
+                    status="processing",
+                )
+                session.add(batch)
+                session.flush()
+
+                items: list[dict[str, str]] = []
+                for index, file_info in enumerate(files):
+                    upload_record = self._create_processing_upload_in_session(
+                        session=session,
+                        tenant=tenant,
+                        filename=file_info["filename"],
+                        content=file_info["content"],
+                        content_type=file_info.get("content_type"),
+                        requested_document_type=requested_document_type,
+                        use_bedrock=use_bedrock,
+                        uploaded_by_user_id=uploaded_by_user_id,
+                    )
+                    batch_item = TranscriptUploadBatchItem(
+                        tenant_id=tenant.id,
+                        batch_id=batch.id,
+                        transcript_id=UUID(upload_record["transcriptId"]),
+                        filename=file_info["filename"],
+                        position=index,
+                        status=upload_record["status"],
+                        error_message=None,
+                    )
+                    session.add(batch_item)
+                    items.append(
+                        {
+                            "filename": file_info["filename"],
+                            "transcriptId": upload_record["transcriptId"],
+                            "documentUploadId": upload_record["documentUploadId"],
+                            "parseRunId": upload_record["parseRunId"],
+                            "status": upload_record["status"],
+                        }
+                    )
+
+            return {
+                "batchId": str(batch.id),
+                "status": batch.status,
+                "totalFiles": len(items),
+                "completedFiles": 0,
+                "failedFiles": 0,
+                "items": items,
+            }
+
     def persist_upload(
         self,
         filename: str,
@@ -136,6 +210,20 @@ class TranscriptPersistenceService:
             return {}
 
         parsed = ParseTranscriptResponse(**response_payload)
+        try:
+            self._validate_parsed_transcript(parsed)
+        except ValueError as exc:
+            self._record_processing_failure_without_transcript(
+                tenant_id=tenant_id,
+                filename=filename,
+                error_message=str(exc),
+                details={
+                    "document_type": requested_document_type,
+                    "content_type": content_type,
+                    "documentId": parsed.documentId,
+                },
+            )
+            raise
         session_factory = self.session_factory()
         with session_factory() as session:
             with session.begin():
@@ -227,6 +315,15 @@ class TranscriptPersistenceService:
                     is_official=parsed.isOfficial,
                 )
                 session.add(demographics)
+                session.flush()
+                resolved_student = self.student_resolution.ensure_student_for_transcript(
+                    session=session,
+                    tenant_id=tenant.id,
+                    transcript=transcript,
+                    demographics=demographics,
+                )
+                if resolved_student is None:
+                    raise ValueError("Could not identify student from transcript.")
 
                 gpa_summary = TranscriptGpaSummary(
                     tenant_id=tenant.id,
@@ -266,6 +363,7 @@ class TranscriptPersistenceService:
             raise ValueError("Database is not configured.")
 
         parsed = ParseTranscriptResponse(**response_payload)
+        self._validate_parsed_transcript(parsed)
         session_factory = self.session_factory()
         with session_factory() as session:
             with session.begin():
@@ -288,6 +386,7 @@ class TranscriptPersistenceService:
                 transcript.page_count = self._page_count(parsed)
 
                 upload.upload_status = "completed"
+                self._update_batch_item_status(session, tenant.id, transcript.id, "completed", None)
 
                 parse_run.response_json = parsed.model_dump(mode="json")
                 parse_run.raw_text_excerpt = str(parsed.metadata.get("raw_text_excerpt") or "")
@@ -321,6 +420,15 @@ class TranscriptPersistenceService:
                     is_official=parsed.isOfficial,
                 )
                 session.add(demographics)
+                session.flush()
+                resolved_student = self.student_resolution.ensure_student_for_transcript(
+                    session=session,
+                    tenant_id=tenant.id,
+                    transcript=transcript,
+                    demographics=demographics,
+                )
+                if resolved_student is None:
+                    raise ValueError("Could not identify student from transcript.")
 
                 gpa_summary = TranscriptGpaSummary(
                     tenant_id=tenant.id,
@@ -368,6 +476,19 @@ class TranscriptPersistenceService:
                 parse_run.status = "failed"
                 parse_run.completed_at = datetime.now(timezone.utc)
                 parse_run.error_message = error_message
+                self._update_batch_item_status(session, tenant.id, transcript.id, "failed", error_message)
+                self._record_processing_failure(
+                    session=session,
+                    tenant_id=tenant.id,
+                    transcript_id=transcript.id,
+                    document_upload_id=upload.id,
+                    filename=upload.original_filename,
+                    error_message=error_message,
+                    details={
+                        "document_type": transcript.document_type,
+                        "parse_run_id": str(parse_run.id) if parse_run else None,
+                    },
+                )
 
     def get_transcript_status(self, transcript_id: str, tenant_id: str) -> dict[str, Any]:
         if not self.is_enabled():
@@ -387,6 +508,85 @@ class TranscriptPersistenceService:
                 "status": status,
                 "error": parse_run.error_message if parse_run else None,
                 "completed": status == "completed",
+            }
+
+    def get_upload_batch_status(self, batch_id: str, tenant_id: str) -> dict[str, Any]:
+        if not self.is_enabled():
+            raise ValueError("Database is not configured.")
+
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            tenant = self._get_tenant(session, tenant_id)
+            batch = self._get_batch(session, batch_id, tenant.id)
+            item_rows = session.execute(
+                select(TranscriptUploadBatchItem, DocumentUpload, TranscriptParseRun)
+                .join(Transcript, Transcript.id == TranscriptUploadBatchItem.transcript_id)
+                .join(DocumentUpload, DocumentUpload.id == Transcript.document_upload_id)
+                .outerjoin(
+                    TranscriptParseRun,
+                    (TranscriptParseRun.transcript_id == TranscriptUploadBatchItem.transcript_id)
+                    & (TranscriptParseRun.tenant_id == tenant.id),
+                )
+                .where(
+                    TranscriptUploadBatchItem.tenant_id == tenant.id,
+                    TranscriptUploadBatchItem.batch_id == batch.id,
+                )
+                .order_by(TranscriptUploadBatchItem.position.asc(), TranscriptParseRun.started_at.desc())
+            ).all()
+
+            latest_by_item: dict[UUID, tuple[TranscriptUploadBatchItem, DocumentUpload, TranscriptParseRun | None]] = {}
+            for item, upload, parse_run in item_rows:
+                latest_by_item.setdefault(item.id, (item, upload, parse_run))
+
+            items: list[dict[str, Any]] = []
+            completed_files = 0
+            failed_files = 0
+            active_files = 0
+            for item, upload, parse_run in latest_by_item.values():
+                status = parse_run.status if parse_run else item.status
+                error = parse_run.error_message if parse_run and parse_run.error_message else item.error_message
+                completed = status == "completed"
+                if completed:
+                    completed_files += 1
+                if status == "failed":
+                    failed_files += 1
+                if status == "processing":
+                    active_files += 1
+                items.append(
+                    {
+                        "filename": item.filename,
+                        "transcriptId": str(item.transcript_id),
+                        "documentUploadId": str(upload.id),
+                        "parseRunId": str(parse_run.id) if parse_run else None,
+                        "status": status,
+                        "error": error,
+                        "completed": completed,
+                        "startedAt": self._format_datetime(parse_run.started_at) if parse_run else None,
+                        "completedAt": self._format_datetime(parse_run.completed_at) if parse_run else None,
+                    }
+                )
+
+            if failed_files and completed_files + failed_files == len(items):
+                batch_status = "completed_with_failures"
+            elif completed_files == len(items):
+                batch_status = "completed"
+            elif failed_files > 0:
+                batch_status = "processing"
+            else:
+                batch_status = "processing"
+
+            if batch.status != batch_status:
+                batch.status = batch_status
+                session.commit()
+
+            return {
+                "batchId": str(batch.id),
+                "status": batch_status,
+                "totalFiles": len(items),
+                "completedFiles": completed_files,
+                "failedFiles": failed_files,
+                "activeFiles": active_files,
+                "items": items,
             }
 
     def get_transcript_result(self, transcript_id: str, tenant_id: str) -> dict[str, Any]:
@@ -445,6 +645,126 @@ class TranscriptPersistenceService:
             .limit(1)
         )
         return session.execute(stmt).scalar_one_or_none()
+
+    def _get_batch(self, session: Session, batch_id: str, tenant_id: UUID) -> TranscriptUploadBatch:
+        try:
+            resolved_batch_id = UUID(str(batch_id))
+        except ValueError as exc:
+            raise ValueError("A valid batch_id is required.") from exc
+
+        batch = (
+            session.query(TranscriptUploadBatch)
+            .filter(TranscriptUploadBatch.id == resolved_batch_id, TranscriptUploadBatch.tenant_id == tenant_id)
+            .one_or_none()
+        )
+        if batch is None:
+            raise ValueError("Upload batch not found.")
+        return batch
+
+    def _update_batch_item_status(
+        self,
+        session: Session,
+        tenant_id: UUID,
+        transcript_id: UUID,
+        status: str,
+        error_message: str | None,
+    ) -> None:
+        item = (
+            session.query(TranscriptUploadBatchItem)
+            .filter(
+                TranscriptUploadBatchItem.tenant_id == tenant_id,
+                TranscriptUploadBatchItem.transcript_id == transcript_id,
+            )
+            .one_or_none()
+        )
+        if item is None:
+            return
+        item.status = status
+        item.error_message = error_message
+
+    def _create_processing_upload_in_session(
+        self,
+        session: Session,
+        tenant: Tenant,
+        filename: str,
+        content: bytes,
+        content_type: str | None,
+        requested_document_type: str,
+        use_bedrock: bool,
+        uploaded_by_user_id: UUID | None,
+    ) -> dict[str, str]:
+        now = datetime.now(timezone.utc)
+        checksum = hashlib.sha256(content).hexdigest()
+
+        upload = DocumentUpload(
+            tenant_id=tenant.id,
+            uploaded_by_user_id=uploaded_by_user_id,
+            original_filename=filename,
+            mime_type=content_type or "application/octet-stream",
+            file_size_bytes=len(content),
+            storage_bucket="direct-upload",
+            storage_key=f"pending/{self._slugify(filename)}",
+            checksum_sha256=checksum,
+            upload_status="processing",
+            uploaded_at=now,
+        )
+        session.add(upload)
+        session.flush()
+
+        transcript = Transcript(
+            tenant_id=tenant.id,
+            document_upload_id=upload.id,
+            student_id=None,
+            source_institution_id=None,
+            document_type=requested_document_type or "auto",
+            status="processing",
+            is_official=False,
+            is_finalized=False,
+            finalized_at=None,
+            finalized_by_user_id=None,
+            is_fraudulent=False,
+            fraud_flagged_at=None,
+            matched_at=None,
+            matched_by=None,
+            parser_confidence=None,
+            page_count=None,
+            notes=None,
+        )
+        session.add(transcript)
+        session.flush()
+
+        upload.storage_key = f"{transcript.id}/{self._slugify(filename)}"
+
+        parse_run = TranscriptParseRun(
+            tenant_id=tenant.id,
+            transcript_id=transcript.id,
+            parser_name="transcript_pipeline",
+            parser_version="v1",
+            request_json={
+                "filename": filename,
+                "content_type": content_type,
+                "requested_document_type": requested_document_type,
+                "use_bedrock": use_bedrock,
+            },
+            response_json=None,
+            raw_text_excerpt=None,
+            warnings_json=[],
+            confidence_score=None,
+            started_at=now,
+            completed_at=None,
+            status="processing",
+            error_message=None,
+        )
+        session.add(parse_run)
+        session.flush()
+
+        return {
+            "tenantId": str(tenant.id),
+            "documentUploadId": str(upload.id),
+            "transcriptId": str(transcript.id),
+            "parseRunId": str(parse_run.id),
+            "status": transcript.status,
+        }
 
     def _find_or_create_institution(self, session: Session, tenant_id: UUID, institution_name: str) -> Institution | None:
         if not institution_name.strip():
@@ -568,6 +888,67 @@ class TranscriptPersistenceService:
         page_numbers = [course.pageNumber for course in parsed.courses if course.pageNumber]
         return max(page_numbers) if page_numbers else None
 
+    def _validate_parsed_transcript(self, parsed: ParseTranscriptResponse) -> None:
+        has_student_identity = bool(
+            parsed.demographic.studentId
+            or (parsed.demographic.firstName and parsed.demographic.lastName)
+        )
+        if not has_student_identity:
+            raise ValueError("Could not identify student from transcript.")
+        if not parsed.courses:
+            raise ValueError("No courses were extracted from transcript.")
+
+    def _record_processing_failure(
+        self,
+        session: Session,
+        tenant_id: UUID,
+        filename: str,
+        error_message: str,
+        details: dict[str, Any] | None = None,
+        transcript_id: UUID | None = None,
+        document_upload_id: UUID | None = None,
+    ) -> None:
+        session.add(
+            TranscriptProcessingFailure(
+                tenant_id=tenant_id,
+                transcript_id=transcript_id,
+                document_upload_id=document_upload_id,
+                filename=filename,
+                failure_code=self._failure_code_from_message(error_message),
+                failure_message=error_message,
+                failure_details=details or {},
+            )
+        )
+
+    def _record_processing_failure_without_transcript(
+        self,
+        tenant_id: str,
+        filename: str,
+        error_message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        if not self.is_enabled():
+            return
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            with session.begin():
+                tenant = self._get_tenant(session, tenant_id)
+                self._record_processing_failure(
+                    session=session,
+                    tenant_id=tenant.id,
+                    filename=filename,
+                    error_message=error_message,
+                    details=details,
+                )
+
+    def _failure_code_from_message(self, error_message: str) -> str:
+        lowered = (error_message or "").lower()
+        if "identify student" in lowered:
+            return "student_resolution_failed"
+        if "no courses were extracted" in lowered:
+            return "course_mapping_failed"
+        return "processing_failed"
+
     def _to_decimal(self, value: Any) -> Decimal | None:
         if value is None or value == "":
             return None
@@ -594,6 +975,13 @@ class TranscriptPersistenceService:
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             return None
+
+    def _format_datetime(self, value: datetime | None) -> str | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
     def _safe_json(self, value: str | None) -> dict[str, Any]:
         if not value:

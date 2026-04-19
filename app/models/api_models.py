@@ -189,6 +189,23 @@ class StartTranscriptUploadResponse(BaseModel):
     status: str
 
 
+class StartTranscriptUploadBatchItemResponse(BaseModel):
+    filename: str
+    transcriptId: str
+    documentUploadId: str
+    parseRunId: str
+    status: str
+
+
+class StartTranscriptUploadBatchResponse(BaseModel):
+    batchId: str
+    status: str
+    totalFiles: int
+    completedFiles: int = 0
+    failedFiles: int = 0
+    items: List[StartTranscriptUploadBatchItemResponse] = Field(default_factory=list)
+
+
 class TranscriptUploadStatusResponse(BaseModel):
     transcriptId: str
     documentUploadId: str
@@ -196,3 +213,25 @@ class TranscriptUploadStatusResponse(BaseModel):
     status: str
     error: Optional[str] = None
     completed: bool = False
+
+
+class TranscriptUploadBatchStatusItemResponse(BaseModel):
+    filename: str
+    transcriptId: str
+    documentUploadId: str
+    parseRunId: Optional[str] = None
+    status: str
+    error: Optional[str] = None
+    completed: bool = False
+    startedAt: Optional[str] = None
+    completedAt: Optional[str] = None
+
+
+class TranscriptUploadBatchStatusResponse(BaseModel):
+    batchId: str
+    status: str
+    totalFiles: int
+    completedFiles: int
+    failedFiles: int
+    activeFiles: int
+    items: List[TranscriptUploadBatchStatusItemResponse] = Field(default_factory=list)

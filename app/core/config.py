@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     heuristic_learning_enabled: bool = False
     heuristic_learning_dir: str = ".heuristics"
     max_upload_mb: int = 15
+    upload_batch_max_workers: int = 4
     database_url: str | None = None
     database_secret_json: str | None = None
     database_host: str | None = None

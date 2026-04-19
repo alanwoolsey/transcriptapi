@@ -168,6 +168,58 @@ class DocumentUpload(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
 
 
+class TranscriptUploadBatch(Base):
+    __tablename__ = "transcript_upload_batches"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    uploaded_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    original_filename: Mapped[str] = mapped_column(Text, nullable=False)
+    file_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'processing'"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_transcript_upload_batches_tenant_created_at", TranscriptUploadBatch.tenant_id, TranscriptUploadBatch.created_at.desc())
+
+
+class TranscriptUploadBatchItem(Base):
+    __tablename__ = "transcript_upload_batch_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    batch_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("transcript_upload_batches.id", ondelete="CASCADE"), nullable=False)
+    transcript_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("transcripts.id", ondelete="CASCADE"), nullable=False)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'processing'"))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_transcript_upload_batch_items_tenant_batch_position", TranscriptUploadBatchItem.tenant_id, TranscriptUploadBatchItem.batch_id, TranscriptUploadBatchItem.position)
+
+
+class TranscriptProcessingFailure(Base):
+    __tablename__ = "transcript_processing_failures"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    transcript_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("transcripts.id", ondelete="SET NULL"))
+    document_upload_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("document_uploads.id", ondelete="SET NULL"))
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    failure_code: Mapped[str] = mapped_column(Text, nullable=False)
+    failure_message: Mapped[str] = mapped_column(Text, nullable=False)
+    failure_details: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_transcript_processing_failures_tenant_created_at", TranscriptProcessingFailure.tenant_id, TranscriptProcessingFailure.created_at.desc())
+Index("ix_transcript_processing_failures_tenant_code_created_at", TranscriptProcessingFailure.tenant_id, TranscriptProcessingFailure.failure_code, TranscriptProcessingFailure.created_at.desc())
+
+
 class Transcript(Base):
     __tablename__ = "transcripts"
 
@@ -330,6 +382,64 @@ class TranscriptStudentMatch(Base):
 
 Index("ix_matches_tenant_student_current", TranscriptStudentMatch.tenant_id, TranscriptStudentMatch.student_id, TranscriptStudentMatch.is_current)
 Index("ix_matches_tenant_transcript_current", TranscriptStudentMatch.tenant_id, TranscriptStudentMatch.transcript_id, TranscriptStudentMatch.is_current)
+
+
+class DecisionPacket(Base):
+    __tablename__ = "decision_packets"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="SET NULL"))
+    transcript_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("transcripts.id", ondelete="SET NULL"))
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    assigned_to_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    queue_name: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'Admissions Review'"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'Draft'"))
+    student_name: Mapped[str] = mapped_column(Text, nullable=False)
+    program_name: Mapped[str] = mapped_column(Text, nullable=False)
+    fit_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    credit_estimate: Mapped[int] = mapped_column(Integer, nullable=False)
+    readiness: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_decision_packets_tenant_created_at", DecisionPacket.tenant_id, DecisionPacket.created_at.desc())
+Index("ix_decision_packets_tenant_student_created_at", DecisionPacket.tenant_id, DecisionPacket.student_id, DecisionPacket.created_at.desc())
+Index("ix_decision_packets_tenant_transcript_id", DecisionPacket.tenant_id, DecisionPacket.transcript_id)
+
+
+class DecisionPacketNote(Base):
+    __tablename__ = "decision_packet_notes"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    decision_packet_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("decision_packets.id", ondelete="CASCADE"), nullable=False)
+    author_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_decision_packet_notes_tenant_packet_created_at", DecisionPacketNote.tenant_id, DecisionPacketNote.decision_packet_id, DecisionPacketNote.created_at.desc())
+
+
+class DecisionPacketEvent(Base):
+    __tablename__ = "decision_packet_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    decision_packet_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("decision_packets.id", ondelete="CASCADE"), nullable=False)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text)
+    event_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_decision_packet_events_tenant_packet_event_at", DecisionPacketEvent.tenant_id, DecisionPacketEvent.decision_packet_id, DecisionPacketEvent.event_at.desc())
 
 
 class WorkflowCase(Base):

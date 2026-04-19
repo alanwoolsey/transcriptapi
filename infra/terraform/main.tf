@@ -650,6 +650,7 @@ resource "aws_ecs_task_definition" "service" {
         { name = "USE_BEDROCK", value = tostring(var.use_bedrock) },
         { name = "USE_TEXTRACT", value = tostring(var.use_textract) },
         { name = "BEDROCK_MODEL_ID", value = var.bedrock_model_id },
+        { name = "UPLOAD_BATCH_MAX_WORKERS", value = tostring(var.upload_batch_max_workers) },
         { name = "RUN_DB_MIGRATIONS_ON_STARTUP", value = "true" }
       ]
       secrets = [

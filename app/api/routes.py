@@ -1,14 +1,18 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from zipfile import BadZipFile
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Path, UploadFile, status
 
 from app.api.dependencies import AuthenticatedTenantContext, get_current_tenant_context
+from app.core.config import settings
 from app.models.api_models import (
     BatchParseTranscriptItem,
     BatchParseTranscriptResponse,
     ParseTranscriptResponse,
+    StartTranscriptUploadBatchResponse,
     StartTranscriptUploadResponse,
+    TranscriptUploadBatchStatusResponse,
     TranscriptUploadStatusResponse,
 )
 from app.services.pipeline import TranscriptPipeline
@@ -22,7 +26,7 @@ pipeline = TranscriptPipeline()
 persistence = TranscriptPersistenceService()
 
 
-@router.post("/uploads", response_model=StartTranscriptUploadResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post("/uploads", response_model=StartTranscriptUploadResponse | StartTranscriptUploadBatchResponse, status_code=status.HTTP_202_ACCEPTED)
 async def start_transcript_upload(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -35,13 +39,44 @@ async def start_transcript_upload(
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
     filename = file.filename or "upload.bin"
-    if get_extension(filename) == ".zip":
-        raise HTTPException(status_code=400, detail="ZIP uploads are not supported by the async transcript upload API.")
-
     normalized_use_bedrock = _normalize_use_bedrock(use_bedrock)
     tenant_id = str(auth_context.tenant.id)
 
     try:
+        if get_extension(filename) == ".zip":
+            extracted_files = _extract_zip_upload(filename, content)
+            upload_record = persistence.create_processing_upload_batch(
+                files=[
+                    {
+                        "filename": extracted_filename,
+                        "content": extracted_content,
+                        "content_type": file.content_type,
+                    }
+                    for extracted_filename, extracted_content in extracted_files
+                ],
+                requested_document_type=document_type,
+                use_bedrock=normalized_use_bedrock,
+                tenant_id=tenant_id,
+                uploaded_by_user_id=auth_context.user.id,
+                original_filename=filename,
+            )
+            background_tasks.add_task(
+                _process_transcript_upload_batch,
+                batch_items=[
+                    {
+                        "transcript_id": item["transcriptId"],
+                        "filename": item["filename"],
+                        "content": extracted_content,
+                        "content_type": file.content_type,
+                    }
+                    for item, (_, extracted_content) in zip(upload_record["items"], extracted_files, strict=False)
+                ],
+                tenant_id=tenant_id,
+                requested_document_type=document_type,
+                use_bedrock=normalized_use_bedrock,
+            )
+            return StartTranscriptUploadBatchResponse(**upload_record)
+
         upload_record = persistence.create_processing_upload(
             filename=filename,
             content=content,
@@ -84,6 +119,24 @@ def get_transcript_upload_status(
             raise HTTPException(status_code=404, detail=detail) from exc
         raise HTTPException(status_code=400, detail=detail) from exc
     return TranscriptUploadStatusResponse(**status_payload)
+
+
+@router.get(
+    "/uploads/batches/{batch_id}/status",
+    response_model=TranscriptUploadBatchStatusResponse,
+)
+def get_transcript_upload_batch_status(
+    batch_id: str = Path(...),
+    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+) -> TranscriptUploadBatchStatusResponse:
+    try:
+        status_payload = persistence.get_upload_batch_status(batch_id=batch_id, tenant_id=str(auth_context.tenant.id))
+    except ValueError as exc:
+        detail = str(exc)
+        if detail == "Upload batch not found.":
+            raise HTTPException(status_code=404, detail=detail) from exc
+        raise HTTPException(status_code=400, detail=detail) from exc
+    return TranscriptUploadBatchStatusResponse(**status_payload)
 
 
 @router.get("/{transcript_id}/results", response_model=ParseTranscriptResponse)
@@ -186,6 +239,34 @@ def _process_transcript_upload(
         persistence.fail_processing_upload(transcript_id=transcript_id, tenant_id=tenant_id, error_message=str(exc))
 
 
+def _process_transcript_upload_batch(
+    batch_items: list[dict[str, object]],
+    tenant_id: str,
+    requested_document_type: str,
+    use_bedrock: bool,
+) -> None:
+    if not batch_items:
+        return
+
+    max_workers = max(1, min(settings.upload_batch_max_workers, len(batch_items)))
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="transcript-batch") as executor:
+        futures = [
+            executor.submit(
+                _process_transcript_upload,
+                transcript_id=str(item["transcript_id"]),
+                tenant_id=tenant_id,
+                filename=str(item["filename"]),
+                content=item["content"],
+                content_type=item["content_type"],
+                requested_document_type=requested_document_type,
+                use_bedrock=use_bedrock,
+            )
+            for item in batch_items
+        ]
+        for future in as_completed(futures):
+            future.result()
+
+
 def _parse_single_upload(
     filename: str,
     content: bytes,
@@ -272,3 +353,13 @@ def _parse_zip_upload(
         failedFiles=failed_files,
         items=items,
     )
+
+
+def _extract_zip_upload(filename: str, content: bytes) -> list[tuple[str, bytes]]:
+    try:
+        files = extract_supported_files_from_zip(content)
+    except BadZipFile as exc:
+        raise ValueError(f"Uploaded file '{filename}' is not a valid ZIP archive.") from exc
+    if not files:
+        raise ValueError("ZIP archive did not contain any supported transcript files.")
+    return files
