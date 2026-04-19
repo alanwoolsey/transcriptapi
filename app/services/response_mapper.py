@@ -11,9 +11,12 @@ GRADE_POINTS = {
     "A+": 4.0,
     "A": 4.0,
     "A-": 3.7,
+    "AB": 3.5,
     "B+": 3.3,
     "B": 3.0,
     "B-": 2.7,
+    "BC": 2.5,
+    "BC*": 2.5,
     "C+": 2.3,
     "C": 2.0,
     "C-": 1.7,
@@ -23,6 +26,8 @@ GRADE_POINTS = {
     "F": 0.0,
     "P": 0.0,
     "S": 0.0,
+    "NR": 0.0,
+    "T": 0.0,
 }
 
 TERM_YEAR_PATTERN = re.compile(
@@ -320,33 +325,43 @@ class TranscriptResponseMapper:
         return "mapped"
 
     def _preferred_institution_name(self, parsed_name: str, metadata: Dict[str, Any]) -> str:
-        if parsed_name and not any(flag in parsed_name.lower() for flag in ("statement of authenticity", "prepared for:")):
-            return parsed_name
+        normalized_parsed = self._normalize_institution_name(parsed_name)
+        if normalized_parsed and not any(flag in normalized_parsed.lower() for flag in ("statement of authenticity", "prepared for:")) and not self._looks_like_courseish_institution_name(normalized_parsed):
+            return normalized_parsed
         header_name = self._institution_from_line_locations(metadata.get("line_locations", []) or [])
         if header_name:
             return header_name
-        return self._institution_from_raw_text(metadata.get("raw_text_excerpt", "") or "") or parsed_name
+        return self._institution_from_raw_text(metadata.get("raw_text_excerpt", "") or "") or normalized_parsed
 
     def _institution_from_line_locations(self, line_locations: List[Dict[str, Any]]) -> str:
+        for line in line_locations:
+            text = (line.get("text") or "").strip()
+            lowered = text.lower()
+            if "madison college unofficial" in lowered or lowered == "madison":
+                return "Madison College"
         candidates = []
         for line in line_locations:
-            if int(line.get("page_number", 0) or 0) != 1:
-                continue
             bbox = line.get("bounding_box", {})
-            if float(bbox.get("top", 9999.0) or 9999.0) > 80.0:
+            top = float(bbox.get("top", 9999.0) or 9999.0)
+            if int(line.get("page_number", 0) or 0) == 1 and top > 80.0:
                 continue
             text = (line.get("text") or "").strip()
             lowered = text.lower()
             if "university" in lowered or "college" in lowered or "school" in lowered:
                 if "statement of authenticity" in lowered or "prepared for:" in lowered:
                     continue
-                candidates.append(text)
+                normalized = self._normalize_institution_name(text)
+                if normalized and not self._looks_like_courseish_institution_name(normalized):
+                    candidates.append(normalized)
         if not candidates:
             return ""
         best = candidates[0]
         return re.sub(r"^[A-Z]{1,3}\s+", "", best).strip()
 
     def _institution_from_raw_text(self, raw_text: str) -> str:
+        normalized = self._normalize_institution_name(raw_text)
+        if normalized:
+            return normalized
         patterns = [
             r"Official Academic Transcript from\s+([^\n]+)",
             r"SS\s+([^\n]+University[^\n]+)",
@@ -355,8 +370,34 @@ class TranscriptResponseMapper:
         for pattern in patterns:
             match = re.search(pattern, raw_text, re.IGNORECASE | re.MULTILINE)
             if match:
-                return match.group(1).strip()
+                candidate = self._normalize_institution_name(match.group(1).strip())
+                if candidate and not self._looks_like_courseish_institution_name(candidate):
+                    return candidate
         return ""
+
+    def _normalize_institution_name(self, value: str) -> str:
+        compact = re.sub(r"\s+", " ", (value or "").strip())
+        lowered = compact.lower()
+        if "madison college unofficial" in lowered or lowered == "madison college":
+            return "Madison College"
+        if self._looks_like_courseish_institution_name(compact):
+            return ""
+        return compact
+
+    def _looks_like_courseish_institution_name(self, value: str) -> bool:
+        compact = re.sub(r"\s+", " ", (value or "").strip())
+        if not compact:
+            return False
+        if re.search(r"\b[A-Z]{2,12}\s+\d{4,8}\b", compact):
+            return True
+        if re.search(r"\b\d+\.\d{2}\b", compact):
+            return True
+        tokens = compact.split()
+        if tokens and normalize_for_match(tokens[-1]) in {"a", "ab", "b", "bc", "bcstar", "c", "d", "f", "w", "nr", "t", "s"}:
+            return True
+        if re.search(r"\b(Attempted|Earned|Grade|Points|Term GPA|Cum GPA|Totals|Course Topic|Repeated:)\b", compact, re.IGNORECASE):
+            return True
+        return False
 
     def _match_course_line(
         self,

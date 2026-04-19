@@ -7,20 +7,21 @@ from app.utils.text_utils import TERM_PATTERN, lines, looks_like_grade
 
 
 class TranscriptHeuristicParser:
+    GRADE_TOKEN_PATTERN = r"A\+?|A-|AB|B\+?|B-|BC\*?|C\+?|C-|D\+?|D-|F|P|NP|S|U|W|I|IP|CR|NC|TR|PR|NR|T"
     COURSE_CODE_PATTERN = r"(?:[A-Z]{2,6}(?:\s+[A-Z]{2,6})?\s+\d{2,4}[A-Z]?|[A-Z]{2,6}[- ]?\d{2,4}[A-Z]?)"
     COURSE_LINE_PATTERN = re.compile(
         r"^"
         r"(?P<course_code>(?:[A-Z]{2,6}(?:\s+[A-Z]{2,6})?\s+\d{2,4}[A-Z]?|[A-Z]{2,6}[- ]?\d{2,4}[A-Z]?))\s+"
         r"(?P<course_title>.+?)\s+"
         r"(?P<credits>\d+(?:\.\d+)?)\s+"
-        r"(?P<grade>A\+?|A-|B\+?|B-|C\+?|C-|D\+?|D-|F|P|NP|S|U|W|I|IP|CR|NC|TR|PR)(?=\s|$)",
+        rf"(?P<grade>{GRADE_TOKEN_PATTERN})(?=\s|$)",
         re.IGNORECASE,
     )
     COURSE_LINE_PATTERN_GRADE_THEN_CREDITS = re.compile(
         r"^"
         r"(?P<course_code>(?:[A-Z]{2,6}(?:\s+[A-Z]{2,6})?\s+\d{2,4}[A-Z]?|[A-Z]{2,6}[- ]?\d{2,4}[A-Z]?))\s+"
         r"(?P<course_title>.+?)\s+"
-        r"(?P<grade>A\+?|A-|B\+?|B-|C\+?|C-|D\+?|D-|F|P|NP|S|U|W|I|IP|CR|NC|TR|PR)(?=\s)\s+"
+        rf"(?P<grade>{GRADE_TOKEN_PATTERN})(?=\s)\s+"
         r"(?P<credits>\d+(?:\.\d+)?)",
         re.IGNORECASE,
     )
@@ -76,6 +77,8 @@ class TranscriptHeuristicParser:
             return self._parse_analysis_report(text, document_type)
         if self._looks_like_milwaukee_area_technical_college_transcript(text):
             return self._parse_milwaukee_area_technical_college_transcript(text, document_type)
+        if self._looks_like_madison_college_transcript(text):
+            return self._parse_madison_college_transcript(text, document_type)
         if self._looks_like_phoenix_transcript(text):
             return self._parse_phoenix_transcript(text, document_type)
         if self._looks_like_utah_export(text):
@@ -139,6 +142,25 @@ class TranscriptHeuristicParser:
     def _looks_like_milwaukee_area_technical_college_transcript(self, text: str) -> bool:
         lowered = re.sub(r"\s+", " ", text.lower())
         return "milwaukee area technical college" in lowered and "id number:" in lowered and "birth date:" in lowered
+
+    def _looks_like_madison_college_transcript(self, text: str) -> bool:
+        lowered = re.sub(r"\s+", " ", text.lower())
+        if "madison college" in lowered and "beginning of student record" in lowered and "course #" in lowered and "course title" in lowered:
+            return True
+        structural_markers = (
+            "beginning of student record" in lowered
+            and "course #" in lowered
+            and "course title" in lowered
+            and "term gpa" in lowered
+            and "cum gpa" in lowered
+        )
+        madison_specific_markers = (
+            "transfer credits" in lowered
+            or "other credits" in lowered
+            or "requestor:" in lowered
+            or "course topic:" in lowered
+        )
+        return structural_markers and madison_specific_markers
 
     def _parse_analysis_report(self, text: str, document_type: str) -> Dict[str, Any]:
         text_lines = lines(text)
@@ -261,6 +283,278 @@ class TranscriptHeuristicParser:
             "parser_confidence": max(confidence, 0.84 if terms else 0.68),
             "course_confidence_summary": course_summary,
         }
+
+    def _parse_madison_college_transcript(self, text: str, document_type: str) -> Dict[str, Any]:
+        text_lines = lines(text)
+        student = {
+            "name": self._extract_regex_group(text, r"Name:\s*([A-Za-z][A-Za-z'., -]+)", title=True) or self._title_case_line_after(text_lines, "Name:"),
+            "student_id": self._extract_regex_group(text, r"ID:\s*([0-9]+)") or self._line_after(text_lines, "ID:"),
+            "date_of_birth": None,
+            "address": {"street": None, "city": None, "state": None, "postal_code": None},
+        }
+        institution_name = "Madison College"
+        summary = self._parse_madison_college_summary(text)
+        terms = self._parse_madison_college_terms(text_lines)
+        terms = self.ensure_course_confidences(terms)
+        course_summary = self.summarize_course_confidence(terms)
+        confidence = self._estimate_confidence(student, [{"name": institution_name, "type": "college"}], summary, terms, course_summary)
+        return {
+            "document_type": "college_transcript",
+            "student": student,
+            "institutions": [{"name": institution_name, "type": "college"}],
+            "academic_summary": summary,
+            "terms": terms,
+            "parser_confidence": max(confidence, 0.84 if terms else 0.65),
+            "course_confidence_summary": course_summary,
+        }
+
+    def _parse_madison_college_summary(self, text: str) -> Dict[str, Any]:
+        main_record = re.split(r"Transfer Credits", text, maxsplit=1, flags=re.IGNORECASE)[0]
+        gpa_matches = list(re.finditer(r"Cum GPA\s+([0-9]+\.[0-9]+)", main_record, re.IGNORECASE))
+        totals_matches = list(
+            re.finditer(
+                r"Cum Totals\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9]+(?:\.[0-9]+)?)",
+                main_record,
+                re.IGNORECASE,
+            )
+        )
+        gpa = float(gpa_matches[-1].group(1)) if gpa_matches else None
+        attempted = float(totals_matches[-1].group(1)) if totals_matches else None
+        earned = float(totals_matches[-1].group(2)) if totals_matches else None
+        return {
+            "gpa": gpa,
+            "total_credits_attempted": attempted,
+            "total_credits_earned": earned,
+            "class_rank": None,
+        }
+
+    def _parse_madison_college_terms(self, text_lines: List[str]) -> List[Dict[str, Any]]:
+        terms: List[Dict[str, Any]] = []
+        idx = 0
+        current_term: str | None = None
+        current_courses: List[Dict[str, Any]] = []
+        current_section = "record"
+        while idx < len(text_lines):
+            line = text_lines[idx].strip()
+            if not line:
+                idx += 1
+                continue
+
+            if re.fullmatch(r"(Spring|Summer|Fall|Winter)\s+(19|20)\d{2}", line, re.IGNORECASE):
+                if current_term and current_courses:
+                    terms.append({"term_name": current_term, "courses": current_courses})
+                suffix = " Transfer" if current_section == "transfer" else ""
+                current_term = f"{line.title()}{suffix}"
+                current_courses = []
+                idx += 1
+                continue
+
+            lowered = line.lower()
+            if lowered == "transfer credits":
+                if current_term and current_courses:
+                    terms.append({"term_name": current_term, "courses": current_courses})
+                current_term = None
+                current_courses = []
+                current_section = "transfer"
+                idx += 1
+                continue
+            if lowered == "other credits":
+                if current_term and current_courses:
+                    terms.append({"term_name": current_term, "courses": current_courses})
+                current_term = "Other Credits"
+                current_courses = []
+                current_section = "other"
+                idx += 1
+                continue
+
+            if current_term is not None:
+                row_course = self._parse_madison_college_course_row(line, current_term)
+                if row_course:
+                    current_courses.append(row_course)
+                    idx += 1
+                    continue
+
+            if self._is_madison_college_subject_line(text_lines, idx):
+                if current_term is None:
+                    current_term = "Unassigned"
+                course, idx = self._consume_madison_college_course(text_lines, idx, current_term)
+                if course:
+                    current_courses.append(course)
+                continue
+
+            idx += 1
+
+        if current_term and current_courses:
+            terms.append({"term_name": current_term, "courses": current_courses})
+        return terms
+
+    def _is_madison_college_subject_line(self, text_lines: List[str], idx: int) -> bool:
+        line = text_lines[idx].strip()
+        if not re.fullmatch(r"[A-Z]{3,12}", line):
+            return False
+        if idx + 1 >= len(text_lines) or not re.fullmatch(r"\d{8}", text_lines[idx + 1].strip()):
+            return False
+        lowered = line.lower()
+        if lowered in {"subject", "course", "grade", "earned"}:
+            return False
+        return True
+
+    def _parse_madison_college_course_row(self, line: str, term_name: str) -> Dict[str, Any] | None:
+        compact = re.sub(r"\s+", " ", line).strip()
+        if not compact or self._should_skip_madison_college_line(compact):
+            return None
+        match = re.match(
+            rf"^(?P<subject>[A-Z]{{3,12}})\s+"
+            rf"(?P<number>\d{{8}})\s+"
+            rf"(?P<title>.+?)\s+"
+            rf"(?P<attempted>\d+\.\d+)"
+            rf"(?:\s+(?P<earned>\d+\.\d+))?"
+            rf"\s+(?P<grade>{self.GRADE_TOKEN_PATTERN})"
+            rf"(?:\s+(?P<points>\d+\.\d+))?$",
+            compact,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+
+        attempted = float(match.group("attempted"))
+        earned = float(match.group("earned")) if match.group("earned") else attempted
+        grade = match.group("grade").upper()
+        points = float(match.group("points")) if match.group("points") else None
+        title = match.group("title").strip()
+        confidence_score, confidence_reasons = self._estimate_course_confidence(
+            course_code=f"{match.group('subject').upper()}{match.group('number')}",
+            course_title=title,
+            credits=earned,
+            grade=grade,
+            term=term_name,
+        )
+        course: Dict[str, Any] = {
+            "course_code": f"{match.group('subject').upper()}{match.group('number')}",
+            "course_title": title,
+            "credits": earned,
+            "grade": grade,
+            "term": term_name,
+            "confidence_score": confidence_score,
+            "confidence_reasons": confidence_reasons,
+            "source_line": compact,
+            "credits_attempted": attempted,
+        }
+        if points is not None:
+            course["grade_points"] = points
+        return course
+
+    def _should_skip_madison_college_line(self, line: str) -> bool:
+        lowered = line.lower()
+        if lowered in {
+            "subject course # course title attempted earned grade",
+            "subject course # course title attempted earned grade points",
+            "course description attempted earned grade points",
+            "attempted earned points",
+            "attempted earned",
+            "gpa",
+        }:
+            return True
+        prefixes = (
+            "term gpa",
+            "cum gpa",
+            "term totals",
+            "cum totals",
+            "course trans gpa",
+            "transfer totals",
+            "course topic:",
+            "repeated:",
+            "request reason:",
+            "requestor:",
+            "applied toward ",
+            "transfer credit from ",
+            "advanced cna licensure",
+            "transferred to term ",
+            "end of student record",
+            "beginning of student record",
+            "madison college unofficial",
+            "name:",
+            "id:",
+        )
+        return lowered.startswith(prefixes)
+
+    def _consume_madison_college_course(self, text_lines: List[str], start_idx: int, term_name: str) -> Tuple[Dict[str, Any] | None, int]:
+        subject = text_lines[start_idx].strip().upper()
+        course_number = text_lines[start_idx + 1].strip()
+        idx = start_idx + 2
+
+        title_parts: List[str] = []
+        while idx < len(text_lines):
+            candidate = text_lines[idx].strip()
+            if re.fullmatch(r"\d+(?:\.\d+)?", candidate):
+                break
+            if self._is_madison_college_subject_line(text_lines, idx) or re.fullmatch(r"(Spring|Summer|Fall|Winter)\s+(19|20)\d{2}", candidate, re.IGNORECASE):
+                return None, idx
+            if candidate.lower() in {
+                "term totals",
+                "cum totals",
+                "term gpa",
+                "cum gpa",
+                "transfer credits",
+                "other credits",
+                "page 2",
+            }:
+                return None, idx
+            title_parts.append(candidate)
+            idx += 1
+
+        if idx >= len(text_lines) or not re.fullmatch(r"\d+(?:\.\d+)?", text_lines[idx].strip()):
+            return None, max(idx, start_idx + 2)
+
+        numeric_tokens: List[str] = []
+        while idx < len(text_lines) and re.fullmatch(r"\d+(?:\.\d+)?", text_lines[idx].strip()):
+            numeric_tokens.append(text_lines[idx].strip())
+            idx += 1
+
+        grade = text_lines[idx].strip().upper() if idx < len(text_lines) and looks_like_grade(text_lines[idx].strip()) else None
+        if grade:
+            idx += 1
+
+        points = None
+        if idx < len(text_lines) and re.fullmatch(r"\d+(?:\.\d+)?", text_lines[idx].strip()):
+            points = float(text_lines[idx].strip())
+            idx += 1
+
+        while idx < len(text_lines):
+            candidate = text_lines[idx].strip()
+            if candidate.lower() == "course topic:":
+                idx += 2
+                continue
+            break
+
+        title = " ".join(part for part in title_parts if part).strip()
+        attempted = float(numeric_tokens[0]) if numeric_tokens else None
+        earned = float(numeric_tokens[1]) if len(numeric_tokens) > 1 else attempted
+        if not title or grade is None:
+            return None, idx
+
+        confidence_score, confidence_reasons = self._estimate_course_confidence(
+            course_code=f"{subject}{course_number}",
+            course_title=title,
+            credits=earned,
+            grade=grade,
+            term=term_name,
+        )
+        course: Dict[str, Any] = {
+            "course_code": f"{subject}{course_number}",
+            "course_title": title,
+            "credits": earned,
+            "grade": grade,
+            "term": term_name,
+            "confidence_score": confidence_score,
+            "confidence_reasons": confidence_reasons,
+            "source_line": f"{subject} {course_number} {title} {' '.join(numeric_tokens)} {grade}".strip(),
+        }
+        if attempted is not None:
+            course["credits_attempted"] = attempted
+        if points is not None:
+            course["grade_points"] = points
+        return course, idx
 
     def _parse_milwaukee_area_technical_college_terms(self, text_lines: List[str]) -> List[Dict[str, Any]]:
         terms: List[Dict[str, Any]] = []
@@ -1671,7 +1965,7 @@ class TranscriptHeuristicParser:
         normalized_lines = [line.strip() for line in text_lines[:25] if line.strip()]
         for idx, line in enumerate(normalized_lines):
             candidate = self._merge_institution_line_fragments(normalized_lines, idx)
-            if any(keyword in candidate.lower() for keyword in self.INSTITUTION_KEYWORDS):
+            if any(keyword in candidate.lower() for keyword in self.INSTITUTION_KEYWORDS) and not self._looks_like_courseish_institution_candidate(candidate):
                 institutions.append({"name": candidate, "type": inst_type})
                 break
         return institutions
@@ -1915,6 +2209,10 @@ class TranscriptHeuristicParser:
         return False
 
     def _preferred_institution_line(self, text_lines: List[str], document_type: str) -> str | None:
+        for line in text_lines[:25]:
+            lowered = line.strip().lower()
+            if "madison college unofficial" in lowered or lowered == "madison college":
+                return "Madison College"
         if document_type == "high_school_transcript":
             for idx, line in enumerate(text_lines):
                 if line.strip().lower() == "gpa summary":
@@ -1925,9 +2223,27 @@ class TranscriptHeuristicParser:
             if re.search(r"high school transcript", line, re.IGNORECASE):
                 window = text_lines[max(0, idx - 5) : idx + 2]
                 for candidate in window:
-                    if re.search(r"(high school|university|college)", candidate, re.IGNORECASE) and "transcript" not in candidate.lower():
+                    if (
+                        re.search(r"(high school|university|college)", candidate, re.IGNORECASE)
+                        and "transcript" not in candidate.lower()
+                        and not self._looks_like_courseish_institution_candidate(candidate)
+                    ):
                         return candidate.strip()
         return None
+
+    def _looks_like_courseish_institution_candidate(self, candidate: str) -> bool:
+        compact = re.sub(r"\s+", " ", (candidate or "").strip())
+        if not compact:
+            return False
+        if re.search(r"\b[A-Z]{2,12}\s+\d{4,8}\b", compact):
+            return True
+        if re.search(r"\b\d+\.\d{2}\b", compact):
+            return True
+        if looks_like_grade(compact.split()[-1]):
+            return True
+        if re.search(r"\b(Attempted|Earned|Grade|Points|Term GPA|Cum GPA|Totals|Course Topic|Repeated:)\b", compact, re.IGNORECASE):
+            return True
+        return False
 
     def _parse_trailing_student_fields(self, text_lines: List[str], student: Dict[str, Any]) -> Dict[str, Any]:
         for idx, line in enumerate(text_lines):

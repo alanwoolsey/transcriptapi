@@ -6,6 +6,26 @@ data "aws_caller_identity" "current" {}
 
 data "aws_region" "current" {}
 
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023.*-x86_64"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
 locals {
   name_prefix              = "${var.project_name}-${var.service_name}"
   azs                      = slice(data.aws_availability_zones.available.names, 0, var.availability_zone_count)
@@ -189,6 +209,26 @@ resource "aws_security_group" "database" {
     security_groups = [aws_security_group.service.id]
   }
 
+  dynamic "ingress" {
+    for_each = var.db_enable_local_access ? [1] : []
+    content {
+      from_port   = 5432
+      to_port     = 5432
+      protocol    = "tcp"
+      cidr_blocks = var.db_local_access_cidrs
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = var.db_enable_bastion ? [1] : []
+    content {
+      from_port       = 5432
+      to_port         = 5432
+      protocol        = "tcp"
+      security_groups = [aws_security_group.db_bastion[0].id]
+    }
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -198,6 +238,55 @@ resource "aws_security_group" "database" {
 
   tags = merge(local.common_tags, {
     Name = "${local.name_prefix}-db-sg"
+  })
+}
+
+resource "aws_key_pair" "db_bastion" {
+  count      = var.db_enable_bastion ? 1 : 0
+  key_name   = "${local.name_prefix}-db-bastion"
+  public_key = file(var.db_bastion_public_key_path)
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-db-bastion-key"
+  })
+}
+
+resource "aws_security_group" "db_bastion" {
+  count       = var.db_enable_bastion ? 1 : 0
+  name        = "${local.name_prefix}-db-bastion-sg"
+  description = "SSH access for DB bastion"
+  vpc_id      = aws_vpc.this.id
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = var.db_local_access_cidrs
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-db-bastion-sg"
+  })
+}
+
+resource "aws_instance" "db_bastion" {
+  count                       = var.db_enable_bastion ? 1 : 0
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = "t3.micro"
+  subnet_id                   = aws_subnet.public[0].id
+  vpc_security_group_ids      = [aws_security_group.db_bastion[0].id]
+  associate_public_ip_address = true
+  key_name                    = aws_key_pair.db_bastion[0].key_name
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-db-bastion"
   })
 }
 
@@ -244,7 +333,7 @@ resource "aws_db_instance" "postgres" {
   parameter_group_name         = aws_db_parameter_group.postgres.name
   backup_retention_period      = var.db_backup_retention_period
   multi_az                     = var.db_multi_az
-  publicly_accessible          = false
+  publicly_accessible          = var.db_enable_local_access
   storage_encrypted            = true
   deletion_protection          = var.db_deletion_protection
   skip_final_snapshot          = var.db_skip_final_snapshot

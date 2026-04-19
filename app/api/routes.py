@@ -5,12 +5,14 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.models.api_models import BatchParseTranscriptItem, BatchParseTranscriptResponse, ParseTranscriptResponse
 from app.services.pipeline import TranscriptPipeline
+from app.services.persistence import TranscriptPersistenceService
 from app.utils.file_utils import extract_supported_files_from_zip, get_extension
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/transcripts", tags=["transcripts"])
 pipeline = TranscriptPipeline()
+persistence = TranscriptPersistenceService()
 
 
 @router.post("/parse", response_model=ParseTranscriptResponse | BatchParseTranscriptResponse)
@@ -70,13 +72,25 @@ def _parse_single_upload(
     requested_document_type: str,
     use_bedrock: bool,
 ) -> dict:
-    return pipeline.process(
+    result = pipeline.process(
         filename=filename,
         content=content,
         content_type=content_type,
         requested_document_type=requested_document_type,
         use_bedrock=use_bedrock,
     )
+    persistence_ids = persistence.persist_upload(
+        filename=filename,
+        content=content,
+        content_type=content_type,
+        requested_document_type=requested_document_type,
+        use_bedrock=use_bedrock,
+        response_payload=result,
+    )
+    if persistence_ids:
+        result.setdefault("metadata", {})
+        result["metadata"]["persistence"] = persistence_ids
+    return result
 
 
 def _parse_zip_upload(

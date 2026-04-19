@@ -132,7 +132,41 @@ The Textract permission scope is intentionally full because you asked for full T
 
 This stack uses one NAT gateway so private Fargate tasks can reach ECR, CloudWatch, Bedrock, Textract, and Secrets Manager. That is the standard layout here, but it does add steady hourly cost.
 
-The database runs on RDS PostgreSQL in private subnets and accepts traffic only from the ECS service security group. The ECS task receives `DATABASE_SECRET_JSON` from Secrets Manager and uses it to connect and apply Alembic migrations automatically on startup.
+The database runs on RDS PostgreSQL in private subnets and accepts traffic only from the ECS service security group by default. The ECS task receives `DATABASE_SECRET_JSON` from Secrets Manager and uses it to connect and apply Alembic migrations automatically on startup.
+
+## Temporary local database access
+
+For local testing, you can opt in to a public RDS endpoint plus a narrow IP allowlist.
+
+Add these values to `terraform.tfvars`:
+
+```hcl
+db_enable_local_access = true
+db_local_access_cidrs  = ["YOUR.PUBLIC.IP.ADDRESS/32"]
+```
+
+Then run:
+
+```powershell
+terraform apply
+```
+
+This changes three things:
+
+- the RDS subnet group switches from private subnets to public subnets
+- `publicly_accessible` is enabled on the RDS instance
+- the DB security group allows `5432` only from the CIDRs you listed
+
+When you are done testing, set:
+
+```hcl
+db_enable_local_access = false
+db_local_access_cidrs  = []
+```
+
+and apply again to return the database to private-only access.
+
+Use this only for short testing windows. Keep the CIDR list as narrow as possible, ideally your current public IP as `/32`.
 
 ## GitHub Actions deployment
 

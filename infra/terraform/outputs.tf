@@ -48,6 +48,11 @@ output "database_secret_arn" {
   value       = aws_secretsmanager_secret.database.arn
 }
 
+output "db_bastion_public_ip" {
+  description = "Public IP of the temporary DB bastion when enabled."
+  value       = try(aws_instance.db_bastion[0].public_ip, null)
+}
+
 output "acm_validation_records" {
   description = "DNS validation records to create manually in GoDaddy when using the managed ACM certificate."
   value = local.create_acm_certificate ? [

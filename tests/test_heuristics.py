@@ -149,6 +149,138 @@ def test_parser_handles_milwaukee_area_technical_college_ocr_rows():
     assert by_code["HUMSVC103"]["term"] == "FA2018"
 
 
+def test_parser_handles_madison_college_vertical_course_rows():
+    parser = TranscriptHeuristicParser()
+    text = """
+    Madison College Unofficial
+    Name:
+    Tiana Richmond-Lee
+    ID:
+    2893109
+    Beginning of Student Record
+    Spring 2025
+    Subject
+    Course #
+    Course Title
+    Attempted
+    Earned
+    Grade
+    COMM
+    20810205
+    Small Group & Interpsni Comm
+    3.00
+    3.00
+    A
+    12.00
+    MATH
+    10804134
+    Mathematical Reasoning
+    3.00
+    3.00
+    BC
+    7.50
+    Course Topic:
+    ARP: Math Reasoning W Workshop
+    MATHABE
+    77854782
+    Reasoning Workshop
+    2.00
+    2.00
+    BC*
+    READING
+    10838105
+    Intro Reading & Study Skills
+    3.00
+    3.00
+    B
+    9.00
+    Term Totals
+    11.00
+    11.00
+    39.00
+    Term GPA
+    3.545
+    Cum Totals
+    32.00
+    17.00
+    46.50
+    Cum GPA
+    2.735
+    Summer 2025
+    ENGLISH
+    10801195
+    Written Communication
+    3.00
+    3.00
+    AB
+    10.50
+    Fall 2025
+    FOUNHLTH
+    31501153
+    Body Structure & Function
+    3.00
+    3.00
+    BC
+    7.50
+    Spring 2026
+    CRIMJUST
+    10504170
+    Introduction to Corrections
+    3.00
+    3.00
+    NR
+    0.00
+    Transfer Credits
+    Fall 2025
+    ENGLISH
+    20801229
+    Contemporary Literature
+    3.00
+    3.00
+    T
+    0.00
+    Other Credits
+    NURSNA
+    30543300
+    Nursing Assistant
+    3.00
+    T
+    """.strip()
+
+    parsed = parser.parse(text, "college_transcript")
+
+    assert parsed["student"]["name"] == "Tiana Richmond-Lee"
+    assert parsed["student"]["student_id"] == "2893109"
+    assert parsed["academic_summary"]["gpa"] == 2.735
+    assert parsed["academic_summary"]["total_credits_attempted"] == 32.0
+    assert parsed["academic_summary"]["total_credits_earned"] == 17.0
+    courses = [course for term in parsed["terms"] for course in term["courses"]]
+    assert len(courses) == 9
+    by_code = {course["course_code"]: course for course in courses}
+    assert by_code["COMM20810205"]["grade"] == "A"
+    assert by_code["MATH10804134"]["grade"] == "BC"
+    assert by_code["MATHABE77854782"]["grade"] == "BC*"
+    assert by_code["ENGLISH10801195"]["grade"] == "AB"
+    assert by_code["CRIMJUST10504170"]["grade"] == "NR"
+    assert by_code["ENGLISH20801229"]["grade"] == "T"
+    assert by_code["NURSNA30543300"]["grade"] == "T"
+
+
+def test_parser_prefers_madison_college_watermark_over_course_line_for_institution():
+    parser = TranscriptHeuristicParser()
+    text = """
+    Madison College UnofficialMadison College Unofficial
+    Name: Tiana Richmond-Lee
+    ID: 2893109
+    Spring 2019
+    ENGLISH 10831103 Intro To College Writing 3.00 0.00 F 0.00
+    """.strip()
+
+    parsed = parser.parse(text, "college_transcript")
+
+    assert parsed["institutions"][0]["name"] == "Madison College"
+
+
 def test_parser_handles_logan_district_flattened_transcript_rows():
     parser = TranscriptHeuristicParser()
     text = """

@@ -173,6 +173,31 @@ variable "db_skip_final_snapshot" {
   default     = true
 }
 
+variable "db_enable_local_access" {
+  description = "When true, place the RDS instance in public subnets, mark it publicly accessible, and allow ingress from db_local_access_cidrs for local testing."
+  type        = bool
+  default     = false
+}
+
+variable "db_local_access_cidrs" {
+  description = "CIDR blocks allowed to connect directly to PostgreSQL when db_enable_local_access is true."
+  type        = list(string)
+  default     = []
+}
+
+variable "db_enable_bastion" {
+  description = "When true, create a small public EC2 bastion for SSH tunneling into the VPC."
+  type        = bool
+  default     = false
+}
+
+variable "db_bastion_public_key_path" {
+  description = "Path to the SSH public key used for the bastion instance when db_enable_bastion is true."
+  type        = string
+  default     = null
+  nullable    = true
+}
+
 variable "tags" {
   description = "Additional tags to apply to resources."
   type        = map(string)

@@ -13,6 +13,8 @@ db_username     = "crtfy_app"
 db_instance_class = "db.t4g.small"
 db_allocated_storage = 20
 db_max_allocated_storage = 100
+db_enable_local_access = false
+db_local_access_cidrs  = ["203.0.113.10/32"]
 
 # First apply:
 # - leave existing_certificate_arn as null

@@ -2,7 +2,7 @@ import re
 from typing import Iterable, List
 
 
-GRADE_PATTERN = re.compile(r"^(A\+?|A-|B\+?|B-|C\+?|C-|D\+?|D-|F|P|NP|S|U|W|I|IP|CR|NC|TR|PR)$", re.IGNORECASE)
+GRADE_PATTERN = re.compile(r"^(A\+?|A-|AB|B\+?|B-|BC\*?|C\+?|C-|D\+?|D-|F|P|NP|S|U|W|I|IP|CR|NC|TR|PR|NR|T)$", re.IGNORECASE)
 TERM_PATTERN = re.compile(
     r"\b(Spring|Summer|Fall|Winter|Spng)(?:\s+(?:I|II|III|IV))?\s+(19|20)\d{2}\b|\b(19|20)\d{2}\s+(Spring|Summer|Fall|Winter|Spng)(?:\s+(?:I|II|III|IV))?\b",
     re.IGNORECASE,
