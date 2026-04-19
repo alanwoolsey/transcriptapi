@@ -643,6 +643,7 @@ resource "aws_ecs_task_definition" "service" {
         { name = "APP_ENV", value = var.app_env },
         { name = "APP_HOST", value = "0.0.0.0" },
         { name = "APP_PORT", value = tostring(var.container_port) },
+        { name = "CORS_ALLOWED_ORIGINS", value = jsonencode(var.cors_allowed_origins) },
         { name = "AWS_REGION", value = var.aws_region },
         { name = "COGNITO_USER_POOL_ID", value = var.cognito_user_pool_id },
         { name = "COGNITO_APP_CLIENT_ID", value = var.cognito_app_client_id },

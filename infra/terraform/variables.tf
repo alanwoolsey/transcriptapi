@@ -16,6 +16,15 @@ variable "cognito_app_client_id" {
   default     = "9j409k1g1kgu67qq2t4ii86rt"
 }
 
+variable "cors_allowed_origins" {
+  description = "Allowed browser origins for cross-origin API requests in non-dev environments."
+  type        = list(string)
+  default = [
+    "https://www.crtfystudent.com",
+    "https://crtfystudent.com",
+  ]
+}
+
 variable "project_name" {
   description = "Project name used in resource names and tags."
   type        = string

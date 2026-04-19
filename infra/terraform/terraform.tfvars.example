@@ -1,6 +1,10 @@
 aws_region      = "us-east-1"
 cognito_user_pool_id  = "us-east-1_QzbkX105v"
 cognito_app_client_id = "9j409k1g1kgu67qq2t4ii86rt"
+cors_allowed_origins = [
+  "https://www.crtfystudent.com",
+  "https://crtfystudent.com",
+]
 project_name    = "transcriptapi"
 service_name    = "transcriptservice"
 domain_name     = "transcriptservice.crtfystudent.com"
