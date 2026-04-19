@@ -26,7 +26,9 @@ app = FastAPI(
     description="API for structured transcript extraction with heuristic controls, Textract fallback, and Bedrock normalization.",
 )
 
-allow_origins = ["*"] if settings.app_env.lower() in {"dev", "local", "development"} else settings.cors_allowed_origins
+allow_origins = settings.cors_allowed_origins
+if settings.app_env.lower() in {"dev", "local", "development"} or not allow_origins or "*" in allow_origins:
+    allow_origins = ["*"]
 
 app.add_middleware(
     CORSMiddleware,

@@ -20,8 +20,7 @@ variable "cors_allowed_origins" {
   description = "Allowed browser origins for cross-origin API requests in non-dev environments."
   type        = list(string)
   default = [
-    "https://www.crtfystudent.com",
-    "https://crtfystudent.com",
+    "*",
   ]
 }
 
