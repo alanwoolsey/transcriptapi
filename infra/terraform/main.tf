@@ -644,6 +644,8 @@ resource "aws_ecs_task_definition" "service" {
         { name = "APP_HOST", value = "0.0.0.0" },
         { name = "APP_PORT", value = tostring(var.container_port) },
         { name = "AWS_REGION", value = var.aws_region },
+        { name = "COGNITO_USER_POOL_ID", value = var.cognito_user_pool_id },
+        { name = "COGNITO_APP_CLIENT_ID", value = var.cognito_app_client_id },
         { name = "USE_BEDROCK", value = tostring(var.use_bedrock) },
         { name = "USE_TEXTRACT", value = tostring(var.use_textract) },
         { name = "BEDROCK_MODEL_ID", value = var.bedrock_model_id },
