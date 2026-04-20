@@ -193,19 +193,27 @@ class Student360Service:
         return records
 
     def _get_canonical_student(self, session: Session, tenant_id: UUID, student_id: str) -> Student360Record | None:
-        try:
-            student_uuid = UUID(student_id)
-        except ValueError:
-            return None
-
         stmt = (
             select(Student, Program, Institution, AppUser)
             .outerjoin(Program, Program.id == Student.target_program_id)
             .outerjoin(Institution, Institution.id == Student.target_institution_id)
             .outerjoin(AppUser, AppUser.id == Student.advisor_user_id)
-            .where(Student.tenant_id == tenant_id, Student.id == student_uuid)
         )
-        row = session.execute(stmt).one_or_none()
+        row = None
+        try:
+            student_uuid = UUID(student_id)
+            row = session.execute(
+                stmt.where(Student.tenant_id == tenant_id, Student.id == student_uuid)
+            ).one_or_none()
+        except ValueError:
+            pass
+        if row is None:
+            for external_id in self._student_identifier_variants(student_id):
+                row = session.execute(
+                    stmt.where(Student.tenant_id == tenant_id, Student.external_student_id == external_id)
+                ).one_or_none()
+                if row is not None:
+                    break
         if row is None:
             return None
 
@@ -256,7 +264,11 @@ class Student360Service:
             key = self._derive_student_key(transcript, demographics)
             grouped[key].append(_TranscriptBundle(transcript=transcript, upload=upload, demographics=demographics, parse_run=parse_run))
 
-        bundles = grouped.get(student_id)
+        bundles = None
+        for candidate_key in self._student_identifier_variants(student_id):
+            bundles = grouped.get(candidate_key)
+            if bundles:
+                break
         if not bundles:
             return None
 
@@ -516,6 +528,15 @@ class Student360Service:
             if key:
                 return key
         return str(transcript.id)
+
+    def _student_identifier_variants(self, student_id: str) -> list[str]:
+        normalized = student_id.strip()
+        variants = [normalized]
+        if normalized.isdigit():
+            stripped = normalized.lstrip("0") or "0"
+            if stripped not in variants:
+                variants.append(stripped)
+        return variants
 
     def _derive_stage_from_bundles(self, bundles: list[_TranscriptBundle]) -> str:
         latest = bundles[0].transcript

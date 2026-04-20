@@ -6,6 +6,9 @@ from fastapi.testclient import TestClient
 
 from app.api.dependencies import get_current_tenant_context
 from app.api.student_routes import router
+from app.services.admissions_ops_service import AdmissionsOpsService
+from app.services.operations_service import OperationsService
+from app.services.student_360_service import Student360Service
 
 
 def _build_test_app() -> FastAPI:
@@ -135,3 +138,9 @@ def test_get_student_returns_404_when_missing(monkeypatch):
     response = client.get("/api/v1/students/missing-student")
 
     assert response.status_code == 404
+
+
+def test_student_identifier_variants_strip_leading_zeros():
+    assert Student360Service()._student_identifier_variants("0002124578") == ["0002124578", "2124578"]
+    assert AdmissionsOpsService()._student_identifier_variants("0002124578") == ["0002124578", "2124578"]
+    assert OperationsService()._student_identifier_variants("0002124578") == ["0002124578", "2124578"]

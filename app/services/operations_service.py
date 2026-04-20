@@ -1200,12 +1200,27 @@ class OperationsService:
         return document, transcript
 
     def _resolve_student(self, session: Session, tenant_id: UUID, student_id: str) -> Student | None:
-        stmt = select(Student).where(Student.tenant_id == tenant_id)
         try:
-            stmt = stmt.where(Student.id == UUID(student_id))
+            return session.execute(
+                select(Student).where(Student.tenant_id == tenant_id, Student.id == UUID(student_id)).limit(1)
+            ).scalar_one_or_none()
         except ValueError:
-            stmt = stmt.where(Student.external_student_id == student_id)
-        return session.execute(stmt.limit(1)).scalar_one_or_none()
+            for external_id in self._student_identifier_variants(student_id):
+                student = session.execute(
+                    select(Student).where(Student.tenant_id == tenant_id, Student.external_student_id == external_id).limit(1)
+                ).scalar_one_or_none()
+                if student is not None:
+                    return student
+        return None
+
+    def _student_identifier_variants(self, student_id: str) -> list[str]:
+        normalized = student_id.strip()
+        variants = [normalized]
+        if normalized.isdigit():
+            stripped = normalized.lstrip("0") or "0"
+            if stripped not in variants:
+                variants.append(stripped)
+        return variants
 
     def _milestone_completion(self, session: Session, tenant_id: UUID, student_id: UUID) -> float:
         total = session.execute(
