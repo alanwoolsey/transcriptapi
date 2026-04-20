@@ -190,26 +190,15 @@ class OperationsService:
                 .where(DocumentUpload.tenant_id == tenant_id)
                 .order_by(DocumentUpload.uploaded_at.desc())
             ).all()
+            transcript_ids = [transcript.id for _upload, transcript, _demographics, _student in rows]
+            latest_parse_runs = self._latest_parse_runs_by_transcript(session, tenant_id, transcript_ids)
+            latest_matches = self._latest_matches_by_transcript(session, tenant_id, transcript_ids)
+            latest_trust_flags = self._latest_open_trust_flags_by_transcript(session, tenant_id, transcript_ids)
             items: list[DocumentQueueItem] = []
             for upload, transcript, demographics, student in rows:
-                parse_run = session.execute(
-                    select(TranscriptParseRun)
-                    .where(TranscriptParseRun.tenant_id == tenant_id, TranscriptParseRun.transcript_id == transcript.id)
-                    .order_by(TranscriptParseRun.started_at.desc())
-                    .limit(1)
-                ).scalar_one_or_none()
-                match = session.execute(
-                    select(TranscriptStudentMatch)
-                    .where(TranscriptStudentMatch.tenant_id == tenant_id, TranscriptStudentMatch.transcript_id == transcript.id)
-                    .order_by(TranscriptStudentMatch.decided_at.desc())
-                    .limit(1)
-                ).scalar_one_or_none()
-                trust_flag = session.execute(
-                    select(TrustFlag)
-                    .where(TrustFlag.tenant_id == tenant_id, TrustFlag.transcript_id == transcript.id, TrustFlag.status.notin_(["resolved", "closed"]))
-                    .order_by(TrustFlag.detected_at.desc())
-                    .limit(1)
-                ).scalar_one_or_none()
+                parse_run = latest_parse_runs.get(transcript.id)
+                match = latest_matches.get(transcript.id)
+                trust_flag = latest_trust_flags.get(transcript.id)
                 status = self._document_status(upload, transcript, parse_run, match, trust_flag)
                 if view and status != view:
                     continue
@@ -229,6 +218,94 @@ class OperationsService:
                     )
                 )
             return DocumentsQueueResponse(items=items)
+
+    def _latest_parse_runs_by_transcript(
+        self,
+        session: Session,
+        tenant_id: UUID,
+        transcript_ids: list[UUID],
+    ) -> dict[UUID, TranscriptParseRun]:
+        if not transcript_ids:
+            return {}
+        ranked = (
+            select(
+                TranscriptParseRun.id.label("id"),
+                func.row_number().over(
+                    partition_by=TranscriptParseRun.transcript_id,
+                    order_by=(TranscriptParseRun.started_at.desc(), TranscriptParseRun.created_at.desc()),
+                ).label("rn"),
+            )
+            .where(
+                TranscriptParseRun.tenant_id == tenant_id,
+                TranscriptParseRun.transcript_id.in_(transcript_ids),
+            )
+            .subquery()
+        )
+        rows = session.execute(
+            select(TranscriptParseRun)
+            .join(ranked, ranked.c.id == TranscriptParseRun.id)
+            .where(ranked.c.rn == 1)
+        ).scalars().all()
+        return {row.transcript_id: row for row in rows}
+
+    def _latest_matches_by_transcript(
+        self,
+        session: Session,
+        tenant_id: UUID,
+        transcript_ids: list[UUID],
+    ) -> dict[UUID, TranscriptStudentMatch]:
+        if not transcript_ids:
+            return {}
+        ranked = (
+            select(
+                TranscriptStudentMatch.id.label("id"),
+                func.row_number().over(
+                    partition_by=TranscriptStudentMatch.transcript_id,
+                    order_by=(TranscriptStudentMatch.decided_at.desc(), TranscriptStudentMatch.created_at.desc()),
+                ).label("rn"),
+            )
+            .where(
+                TranscriptStudentMatch.tenant_id == tenant_id,
+                TranscriptStudentMatch.transcript_id.in_(transcript_ids),
+            )
+            .subquery()
+        )
+        rows = session.execute(
+            select(TranscriptStudentMatch)
+            .join(ranked, ranked.c.id == TranscriptStudentMatch.id)
+            .where(ranked.c.rn == 1)
+        ).scalars().all()
+        return {row.transcript_id: row for row in rows}
+
+    def _latest_open_trust_flags_by_transcript(
+        self,
+        session: Session,
+        tenant_id: UUID,
+        transcript_ids: list[UUID],
+    ) -> dict[UUID, TrustFlag]:
+        if not transcript_ids:
+            return {}
+        ranked = (
+            select(
+                TrustFlag.id.label("id"),
+                func.row_number().over(
+                    partition_by=TrustFlag.transcript_id,
+                    order_by=(TrustFlag.detected_at.desc(), TrustFlag.created_at.desc()),
+                ).label("rn"),
+            )
+            .where(
+                TrustFlag.tenant_id == tenant_id,
+                TrustFlag.transcript_id.in_(transcript_ids),
+                TrustFlag.status.notin_(["resolved", "closed"]),
+            )
+            .subquery()
+        )
+        rows = session.execute(
+            select(TrustFlag)
+            .join(ranked, ranked.c.id == TrustFlag.id)
+            .where(ranked.c.rn == 1)
+        ).scalars().all()
+        return {row.transcript_id: row for row in rows if row.transcript_id is not None}
 
     def confirm_document_match(self, tenant_id: UUID, document_id: str, student_id: str, actor_user_id: UUID | None) -> ActionResponse:
         session_factory = self.session_factory()
