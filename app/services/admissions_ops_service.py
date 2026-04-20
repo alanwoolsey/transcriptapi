@@ -36,7 +36,6 @@ from app.models.ops_models import (
     DocumentExceptionItem,
     DocumentExceptionsResponse,
     LinkChecklistItemRequest,
-    StudentChecklistResponse,
     StudentReadinessResponse,
     WorkBlockingItem,
     WorkChecklistSummary,
@@ -70,12 +69,12 @@ class AdmissionsOpsService:
     def __init__(self, session_factory=None) -> None:
         self.session_factory = session_factory or get_session_factory
 
-    def get_student_checklist(self, tenant_id: UUID, student_id: str) -> StudentChecklistResponse:
+    def get_student_checklist(self, tenant_id: UUID, student_id: str) -> list[ChecklistItemResponse]:
         session_factory = self.session_factory()
         with session_factory() as session:
             context = self._ensure_student_state(session, tenant_id, student_id)
             session.commit()
-            return self._serialize_checklist(context.student, context.checklist, context.items)
+            return self._serialize_checklist_items(context.items)
 
     def update_checklist_item_status(
         self,
@@ -85,9 +84,9 @@ class AdmissionsOpsService:
         student_id: str,
         item_id: str,
         status: str,
-    ) -> StudentChecklistResponse:
+    ) -> list[ChecklistItemResponse]:
         normalized_status = status.strip().lower()
-        if normalized_status not in {"missing", "received", "needs_review", "complete", "waived", "not_required"}:
+        if normalized_status not in {"missing", "needs_review", "complete"}:
             raise AdmissionsOpsValidationError("Invalid checklist item status.")
 
         context = self._ensure_student_state(db, tenant_id, student_id)
@@ -142,7 +141,7 @@ class AdmissionsOpsService:
                 },
             )
         db.commit()
-        return self._serialize_checklist(context.student, context.checklist, context.items)
+        return self._serialize_checklist_items(context.items)
 
     def get_student_readiness(self, tenant_id: UUID, student_id: str) -> StudentReadinessResponse:
         session_factory = self.session_factory()
@@ -202,7 +201,7 @@ class AdmissionsOpsService:
         actor_user_id: UUID,
         document_id: str,
         payload: LinkChecklistItemRequest,
-    ) -> StudentChecklistResponse:
+    ) -> list[ChecklistItemResponse]:
         student = self._resolve_student(db, tenant_id, payload.studentId)
         if student is None:
             raise AdmissionsOpsNotFoundError("Student not found.")
@@ -289,7 +288,7 @@ class AdmissionsOpsService:
                 },
             )
         db.commit()
-        return self._serialize_checklist(context.student, context.checklist, context.items)
+        return self._serialize_checklist_items(context.items)
 
     def get_document_exceptions(self, tenant_id: UUID) -> DocumentExceptionsResponse:
         session_factory = self.session_factory()
@@ -913,33 +912,34 @@ class AdmissionsOpsService:
                 return item
         raise AdmissionsOpsNotFoundError("Checklist item not found.")
 
-    def _serialize_checklist(self, student: Student, checklist: StudentChecklist, items: list[StudentChecklistItem]) -> StudentChecklistResponse:
+    def _frontend_checklist_status(self, status: str) -> str:
+        normalized = (status or "").lower()
+        if normalized in {"complete", "waived", "not_required"}:
+            return "complete"
+        if normalized in {"needs_review", "received"}:
+            return "needs_review"
+        return "missing"
+
+    def _serialize_checklist_items(self, items: list[StudentChecklistItem]) -> list[ChecklistItemResponse]:
         sorted_items = sorted(items, key=lambda item: (item.required is False, item.label.lower()))
-        return StudentChecklistResponse(
-            studentId=self._student_identifier(student),
-            population=checklist.population,
-            completionPercent=checklist.completion_percent,
-            oneItemAway=checklist.one_item_away,
-            status=checklist.status,
-            items=[
-                ChecklistItemResponse(
-                    id=str(item.id),
-                    code=item.code,
-                    label=item.label,
-                    required=item.required,
-                    status=item.status,
-                    done=item.status in {"complete", "waived", "not_required"},
-                    category=self._checklist_category(item.code),
-                    receivedAt=self._isoformat(item.received_at),
-                    completedAt=self._isoformat(item.completed_at),
-                    sourceDocumentId=(str(item.source_document_id) if item.source_document_id else None),
-                    sourceConfidence=self._to_float(item.source_confidence, None),
-                    updatedAt=self._isoformat(item.updated_at),
-                    updatedBy={"id": str(item.updated_by_user_id), "name": "User"} if item.updated_by_user_id else None,
-                )
-                for item in sorted_items
-            ],
-        )
+        return [
+            ChecklistItemResponse(
+                id=str(item.id),
+                code=item.code,
+                label=item.label,
+                required=item.required,
+                status=self._frontend_checklist_status(item.status),
+                done=self._frontend_checklist_status(item.status) == "complete",
+                category=self._checklist_category(item.code),
+                receivedAt=self._isoformat(item.received_at),
+                completedAt=self._isoformat(item.completed_at),
+                sourceDocumentId=(str(item.source_document_id) if item.source_document_id else None),
+                sourceConfidence=self._to_float(item.source_confidence, None),
+                updatedAt=self._isoformat(item.updated_at),
+                updatedBy={"id": str(item.updated_by_user_id), "name": "User"} if item.updated_by_user_id else None,
+            )
+            for item in sorted_items
+        ]
 
     def _checklist_category(self, code: str) -> str:
         normalized = (code or "").lower()

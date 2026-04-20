@@ -69,6 +69,146 @@ def test_get_admin_users_returns_paginated_payload(monkeypatch):
     assert payload["items"][0]["userId"] == "123"
 
 
+def test_get_incomplete_queue_returns_frontend_shape(monkeypatch):
+    from app.api import operations_routes
+
+    monkeypatch.setattr(
+        operations_routes.operations_service,
+        "list_incomplete",
+        lambda tenant_id, **kwargs: {
+            "items": [
+                {
+                    "id": "inc_1",
+                    "studentId": "stu_1001",
+                    "studentName": "Maya Johnson",
+                    "population": "transfer",
+                    "program": "Nursing BSN",
+                    "missingItemsCount": 2,
+                    "missingItems": ["Official transcript", "Residency proof"],
+                    "completedItemsCount": 3,
+                    "totalRequired": 5,
+                    "daysStalled": 2,
+                    "closestToComplete": False,
+                    "assignedOwner": {"id": "123", "name": "Jane Smith"},
+                    "suggestedNextAction": "Request official transcript",
+                    "readinessState": "in_progress",
+                    "priorityScore": 88,
+                    "lastActivityAt": "2026-04-18T15:00:00Z",
+                }
+            ],
+            "page": 1,
+            "pageSize": 25,
+            "total": 1,
+        },
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.get("/api/v1/incomplete?view=submitted_missing_items&q=maya")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["program"] == "Nursing BSN"
+    assert item["completedItemsCount"] == 3
+
+
+def test_get_review_ready_queue_accepts_q_and_returns_frontend_shape(monkeypatch):
+    from app.api import operations_routes
+
+    monkeypatch.setattr(
+        operations_routes.operations_service,
+        "list_review_ready",
+        lambda tenant_id, **kwargs: {
+            "items": [
+                {
+                    "id": "rr_1",
+                    "studentId": "stu_1001",
+                    "studentName": "Maya Johnson",
+                    "population": "transfer",
+                    "program": "Nursing BSN",
+                    "assignedReviewer": {"id": "900", "name": "A. Reviewer"},
+                    "daysWaiting": 1,
+                    "reviewSlaHours": 24,
+                    "transferCredits": 27,
+                    "completedItemsCount": 5,
+                    "totalRequired": 5,
+                }
+            ]
+        },
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.get("/api/v1/review-ready?q=maya")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["population"] == "transfer"
+    assert item["completedItemsCount"] == 5
+
+
+def test_get_yield_queue_accepts_q_and_returns_frontend_shape(monkeypatch):
+    from app.api import operations_routes
+
+    monkeypatch.setattr(
+        operations_routes.operations_service,
+        "list_yield",
+        lambda tenant_id, **kwargs: {
+            "items": [
+                {
+                    "studentId": "stu_1001",
+                    "studentName": "Maya Johnson",
+                    "program": "Nursing BSN",
+                    "admitDate": "2026-04-15T00:00:00Z",
+                    "depositStatus": "not_deposited",
+                    "yieldScore": 72,
+                    "lastActivityAt": "2026-04-20T10:00:00Z",
+                    "milestoneCompletion": 0.4,
+                    "assignedCounselor": {"id": "123", "name": "Jane Smith"},
+                    "nextStep": "Call after housing page visit",
+                }
+            ]
+        },
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.get("/api/v1/yield?view=missing_next_step&q=maya")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["program"] == "Nursing BSN"
+    assert item["nextStep"] == "Call after housing page visit"
+
+
+def test_get_melt_queue_accepts_q_and_returns_frontend_shape(monkeypatch):
+    from app.api import operations_routes
+
+    monkeypatch.setattr(
+        operations_routes.operations_service,
+        "list_melt",
+        lambda tenant_id, **kwargs: {
+            "items": [
+                {
+                    "studentId": "stu_1001",
+                    "studentName": "Maya Johnson",
+                    "program": "Nursing BSN",
+                    "depositDate": "2026-04-10T00:00:00Z",
+                    "meltRisk": 31,
+                    "missingMilestones": ["Orientation registration"],
+                    "lastOutreachAt": "2026-04-18T14:00:00Z",
+                    "owner": {"id": "123", "name": "Jane Smith"},
+                }
+            ]
+        },
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.get("/api/v1/melt?view=missing_orientation&q=maya")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["program"] == "Nursing BSN"
+    assert item["meltRisk"] == 31
+
+
 def test_create_admin_user_returns_created_record(monkeypatch):
     from app.api import operations_routes
 

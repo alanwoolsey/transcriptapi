@@ -17,15 +17,6 @@ class ChecklistItemResponse(BaseModel):
     updatedBy: dict[str, str] | None = None
 
 
-class StudentChecklistResponse(BaseModel):
-    studentId: str
-    population: str
-    completionPercent: int
-    oneItemAway: bool
-    status: str
-    items: list[ChecklistItemResponse] = Field(default_factory=list)
-
-
 class ChecklistStatusUpdateRequest(BaseModel):
     status: str
 

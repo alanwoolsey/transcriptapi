@@ -16,9 +16,12 @@ class IncompleteQueueItem(BaseModel):
     id: str
     studentId: str
     studentName: str
-    stage: str
+    population: str
+    program: str
     missingItemsCount: int
     missingItems: list[str] = Field(default_factory=list)
+    completedItemsCount: int = 0
+    totalRequired: int = 0
     lastActivityAt: str | None = None
     daysStalled: int = 0
     closestToComplete: bool = False
@@ -36,13 +39,14 @@ class ReviewReadyItem(BaseModel):
     id: str
     studentId: str
     studentName: str
+    population: str
     program: str
-    fitScore: int
     transferCredits: float | int
-    trustStatus: str
     assignedReviewer: SimpleUserRef | None = None
     daysWaiting: int = 0
     reviewSlaHours: int = 24
+    completedItemsCount: int = 0
+    totalRequired: int = 0
 
 
 class ReviewReadyResponse(BaseModel):
@@ -78,12 +82,14 @@ class ActionResponse(BaseModel):
 class YieldQueueItem(BaseModel):
     studentId: str
     studentName: str
+    program: str
     admitDate: str | None = None
     depositStatus: str
     yieldScore: int
     lastActivityAt: str | None = None
     milestoneCompletion: float = 0.0
     assignedCounselor: SimpleUserRef | None = None
+    nextStep: str | None = None
 
 
 class YieldQueueResponse(BaseModel):
@@ -93,6 +99,7 @@ class YieldQueueResponse(BaseModel):
 class MeltQueueItem(BaseModel):
     studentId: str
     studentName: str
+    program: str
     depositDate: str | None = None
     meltRisk: int
     missingMilestones: list[str] = Field(default_factory=list)

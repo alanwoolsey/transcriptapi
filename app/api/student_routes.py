@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import AuthenticatedTenantContext, get_current_tenant_context
 from app.db import get_db
-from app.models.ops_models import ChecklistStatusUpdateRequest, StudentChecklistResponse, StudentReadinessResponse
+from app.models.ops_models import ChecklistItemResponse, ChecklistStatusUpdateRequest, StudentReadinessResponse
 from app.models.student_models import Student360ListRecord, Student360Record
 from app.services.admissions_ops_service import AdmissionsOpsNotFoundError, AdmissionsOpsService, AdmissionsOpsValidationError
 from app.services.student_360_service import Student360Service
@@ -32,25 +32,25 @@ def get_student(
     return record
 
 
-@router.get("/{student_id}/checklist", response_model=StudentChecklistResponse)
+@router.get("/{student_id}/checklist", response_model=list[ChecklistItemResponse])
 def get_student_checklist(
     student_id: str,
     auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
-) -> StudentChecklistResponse:
+) -> list[ChecklistItemResponse]:
     try:
         return admissions_ops_service.get_student_checklist(auth_context.tenant.id, student_id)
     except AdmissionsOpsNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/{student_id}/checklist/items/{item_id}/status", response_model=StudentChecklistResponse)
+@router.post("/{student_id}/checklist/items/{item_id}/status", response_model=list[ChecklistItemResponse])
 def update_student_checklist_item_status(
     student_id: str,
     item_id: str,
     payload: ChecklistStatusUpdateRequest,
     auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
     db: Session = Depends(get_db),
-) -> StudentChecklistResponse:
+) -> list[ChecklistItemResponse]:
     try:
         return admissions_ops_service.update_checklist_item_status(
             db=db,

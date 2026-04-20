@@ -3,20 +3,20 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import AuthenticatedTenantContext, get_current_tenant_context
 from app.db import get_db
-from app.models.ops_models import DocumentExceptionsResponse, LinkChecklistItemRequest, StudentChecklistResponse
+from app.models.ops_models import ChecklistItemResponse, DocumentExceptionsResponse, LinkChecklistItemRequest
 from app.services.admissions_ops_service import AdmissionsOpsNotFoundError, AdmissionsOpsService, AdmissionsOpsValidationError
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 admissions_ops_service = AdmissionsOpsService()
 
 
-@router.post("/{document_id}/link-checklist-item", response_model=StudentChecklistResponse)
+@router.post("/{document_id}/link-checklist-item", response_model=list[ChecklistItemResponse])
 def link_document_to_checklist_item(
     document_id: str,
     payload: LinkChecklistItemRequest,
     auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
     db: Session = Depends(get_db),
-) -> StudentChecklistResponse:
+) -> list[ChecklistItemResponse]:
     try:
         return admissions_ops_service.link_document_to_checklist_item(
             db=db,

@@ -62,9 +62,10 @@ def get_incomplete_queue(
 
 @router.get("/review-ready", response_model=ReviewReadyResponse)
 def get_review_ready_queue(
+    q: str | None = Query(default=None),
     auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
 ) -> ReviewReadyResponse:
-    return operations_service.list_review_ready(auth_context.tenant.id)
+    return operations_service.list_review_ready(auth_context.tenant.id, q=q)
 
 
 @router.get("/documents/queue", response_model=DocumentsQueueResponse)
@@ -132,17 +133,19 @@ def release_document(
 @router.get("/yield", response_model=YieldQueueResponse)
 def get_yield_queue(
     view: str | None = Query(default=None),
+    q: str | None = Query(default=None),
     auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
 ) -> YieldQueueResponse:
-    return operations_service.list_yield(auth_context.tenant.id, view=view)
+    return operations_service.list_yield(auth_context.tenant.id, view=view, q=q)
 
 
 @router.get("/melt", response_model=MeltQueueResponse)
 def get_melt_queue(
     view: str | None = Query(default=None),
+    q: str | None = Query(default=None),
     auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
 ) -> MeltQueueResponse:
-    return operations_service.list_melt(auth_context.tenant.id, view=view)
+    return operations_service.list_melt(auth_context.tenant.id, view=view, q=q)
 
 
 @router.get("/integrations/handoff", response_model=HandoffResponse)

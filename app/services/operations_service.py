@@ -128,9 +128,12 @@ class OperationsService:
                 id=item.id,
                 studentId=item.studentId,
                 studentName=item.studentName,
-                stage=item.stage,
+                population=item.population,
+                program=item.program,
                 missingItemsCount=len(missing_items),
                 missingItems=missing_items,
+                completedItemsCount=item.checklistSummary.completedCount,
+                totalRequired=item.checklistSummary.totalRequired,
                 lastActivityAt=item.updatedAt,
                 daysStalled=self._days_stalled(item.updatedAt),
                 closestToComplete=item.checklistSummary.oneItemAway,
@@ -146,7 +149,7 @@ class OperationsService:
         paged = items[start:start + page_size]
         return IncompleteQueueResponse(items=paged, page=page, pageSize=page_size, total=len(items))
 
-    def list_review_ready(self, tenant_id: UUID) -> ReviewReadyResponse:
+    def list_review_ready(self, tenant_id: UUID, *, q: str | None = None) -> ReviewReadyResponse:
         work = self.admissions_ops.get_work_items(
             tenant_id,
             section="ready",
@@ -154,7 +157,7 @@ class OperationsService:
             owner=None,
             priority=None,
             aging_bucket=None,
-            q=None,
+            q=q,
             limit=200,
             offset=0,
         )
@@ -163,13 +166,14 @@ class OperationsService:
                 id=item.id,
                 studentId=item.studentId,
                 studentName=item.studentName,
+                population=item.population,
                 program=item.program,
-                fitScore=item.fitScore,
                 transferCredits=0,
-                trustStatus="clear" if (item.readiness or {}).get("state") != "blocked_by_trust" else "blocked",
                 assignedReviewer=SimpleUserRef(id=item.owner.id, name=item.owner.name),
                 daysWaiting=self._days_stalled(item.updatedAt),
                 reviewSlaHours=24,
+                completedItemsCount=item.checklistSummary.completedCount,
+                totalRequired=item.checklistSummary.totalRequired,
             )
             for item in work.items
         ]
@@ -361,7 +365,7 @@ class OperationsService:
             session.commit()
             return ActionResponse(status="released", detail="Document released.")
 
-    def list_yield(self, tenant_id: UUID, *, view: str | None = None) -> YieldQueueResponse:
+    def list_yield(self, tenant_id: UUID, *, view: str | None = None, q: str | None = None) -> YieldQueueResponse:
         session_factory = self.session_factory()
         with session_factory() as session:
             rows = session.execute(
@@ -375,21 +379,25 @@ class OperationsService:
             for student, score, advisor in rows:
                 yield_score = int(score.score) if score else 0
                 deposit_status = "deposited" if yield_score >= 80 else "not_deposited"
+                program = self._program_name(session, student)
+                next_step = self._yield_next_step(session, tenant_id, student.id)
                 item = YieldQueueItem(
                     studentId=str(student.id),
                     studentName=self._student_name(student, None),
+                    program=program,
                     admitDate=self._iso(student.created_at),
                     depositStatus=deposit_status,
                     yieldScore=yield_score,
                     lastActivityAt=self._iso(student.latest_activity_at or student.updated_at),
                     milestoneCompletion=self._milestone_completion(session, tenant_id, student.id),
                     assignedCounselor=(SimpleUserRef(id=str(advisor.id), name=advisor.display_name) if advisor else None),
+                    nextStep=next_step,
                 )
-                if self._matches_yield_view(item, view):
+                if self._matches_yield_view(item, view, student=student, next_step=next_step) and self._matches_yield_q(item, q):
                     items.append(item)
             return YieldQueueResponse(items=items)
 
-    def list_melt(self, tenant_id: UUID, *, view: str | None = None) -> MeltQueueResponse:
+    def list_melt(self, tenant_id: UUID, *, view: str | None = None, q: str | None = None) -> MeltQueueResponse:
         session_factory = self.session_factory()
         with session_factory() as session:
             rows = session.execute(
@@ -402,16 +410,18 @@ class OperationsService:
             items: list[MeltQueueItem] = []
             for student, score, advisor in rows:
                 missing = self._missing_milestones(session, tenant_id, student.id)
+                program = self._program_name(session, student)
                 item = MeltQueueItem(
                     studentId=str(student.id),
                     studentName=self._student_name(student, None),
+                    program=program,
                     depositDate=self._iso(student.created_at),
                     meltRisk=int(score.score) if score else 0,
                     missingMilestones=missing,
                     lastOutreachAt=self._iso(student.latest_activity_at or student.updated_at),
                     owner=(SimpleUserRef(id=str(advisor.id), name=advisor.display_name) if advisor else None),
                 )
-                if self._matches_melt_view(item, view):
+                if self._matches_melt_view(item, view) and self._matches_melt_q(item, q):
                     items.append(item)
             return MeltQueueResponse(items=items)
 
@@ -1145,6 +1155,12 @@ class OperationsService:
         ).scalars().all()
         return [row.milestone_label for row in rows]
 
+    def _yield_next_step(self, session: Session, tenant_id: UUID, student_id: UUID) -> str | None:
+        missing = self._missing_milestones(session, tenant_id, student_id)
+        if missing:
+            return f"Complete {missing[0]}"
+        return None
+
     def _document_status(
         self,
         upload: DocumentUpload,
@@ -1168,6 +1184,8 @@ class OperationsService:
     def _matches_incomplete_view(self, item: IncompleteQueueItem, view: str | None) -> bool:
         if not view:
             return True
+        if view == "submitted_missing_items":
+            return item.missingItemsCount > 0
         if view == "nearly_complete":
             return item.closestToComplete
         if view == "aging":
@@ -1180,13 +1198,19 @@ class OperationsService:
             return any("fafsa" in missing.lower() for missing in item.missingItems)
         return True
 
-    def _matches_yield_view(self, item: YieldQueueItem, view: str | None) -> bool:
+    def _matches_yield_view(self, item: YieldQueueItem, view: str | None, *, student: Student, next_step: str | None) -> bool:
         if not view:
             return True
+        if view == "newly_admitted":
+            return self._days_stalled(item.admitDate) <= 7
         if view == "high_likelihood":
             return item.yieldScore >= 70
+        if view == "high_value_transfer":
+            return (self._to_float(student.accepted_credits, 0.0) or 0.0) > 0 and item.yieldScore >= 60
+        if view == "scholarship_sensitive":
+            return bool(next_step and "scholarship" in next_step.lower())
         if view == "missing_next_step":
-            return item.milestoneCompletion < 1.0
+            return bool(next_step)
         if view == "no_recent_activity":
             return self._days_stalled(item.lastActivityAt) >= 7
         return True
@@ -1194,15 +1218,33 @@ class OperationsService:
     def _matches_melt_view(self, item: MeltQueueItem, view: str | None) -> bool:
         if not view:
             return True
+        if view == "all_clear":
+            return item.meltRisk < 50 and not item.missingMilestones
         if view == "at_risk":
             return item.meltRisk >= 50
         if view == "missing_fafsa":
             return any("fafsa" in entry.lower() for entry in item.missingMilestones)
         if view == "missing_orientation":
             return any("orientation" in entry.lower() for entry in item.missingMilestones)
+        if view == "missing_final_transcript":
+            return any("final transcript" in entry.lower() for entry in item.missingMilestones)
         if view == "registration_incomplete":
             return any("registration" in entry.lower() for entry in item.missingMilestones)
         return True
+
+    def _matches_yield_q(self, item: YieldQueueItem, q: str | None) -> bool:
+        if not q or not q.strip():
+            return True
+        needle = q.strip().lower()
+        haystack = " ".join(filter(None, [item.studentName, item.program, item.nextStep or ""])).lower()
+        return needle in haystack
+
+    def _matches_melt_q(self, item: MeltQueueItem, q: str | None) -> bool:
+        if not q or not q.strip():
+            return True
+        needle = q.strip().lower()
+        haystack = " ".join([item.studentName, item.program, " ".join(item.missingMilestones)]).lower()
+        return needle in haystack
 
     def _handoff_status(self, value: str | None) -> str:
         normalized = (value or "").lower()
