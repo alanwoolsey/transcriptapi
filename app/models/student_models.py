@@ -5,8 +5,19 @@ from pydantic import BaseModel, Field
 
 
 class StudentChecklistItem(BaseModel):
+    id: str | None = None
     label: str
+    status: str | None = None
     done: bool
+    required: bool | None = None
+    category: str | None = None
+    updatedAt: str | None = None
+    updatedBy: dict[str, str] | None = None
+
+
+class StudentProgramSummary(BaseModel):
+    id: str | None = None
+    name: str
 
 
 class StudentTimelineStep(BaseModel):
@@ -54,27 +65,40 @@ class StudentRecommendation(BaseModel):
     nextBestAction: str
 
 
-class Student360Record(BaseModel):
+class Student360ListRecord(BaseModel):
     id: str
     name: str
-    preferredName: str
+    preferredName: str | None = None
     email: str | None = None
     phone: str | None = None
-    program: str
+    program: str | StudentProgramSummary
+    studentType: str | None = None
     institutionGoal: str
     stage: str
     risk: str
     advisor: str
-    city: str
+    city: str | None = None
+    fitScore: int
+    depositLikelihood: int
+    summary: str
     gpa: float
     creditsAccepted: float | int
     transcriptsCount: int
-    fitScore: int
-    depositLikelihood: int
-    lastActivity: str
+    lastActivity: str | None = None
     tags: list[str] = Field(default_factory=list)
-    summary: str
-    checklist: list[StudentChecklistItem] = Field(default_factory=list)
-    transcripts: list[StudentTranscriptRecord] = Field(default_factory=list)
-    termGpa: list[StudentTermGpa] = Field(default_factory=list)
+    nextBestAction: str
+    checklist: list[StudentChecklistItem] | None = None
+    transcripts: list[StudentTranscriptRecord] | None = None
+    termGpa: list[StudentTermGpa] | None = None
+    recommendation: StudentRecommendation | None = None
+
+
+class Student360Record(Student360ListRecord):
+    preferredName: str
+    city: str
+    lastActivity: str
     recommendation: StudentRecommendation
+    yield_data: dict[str, Any] | None = Field(default=None, alias="yield")
+    handoff: dict[str, Any] | None = None
+    trustSummary: dict[str, Any] | None = None
+    decisionSummary: dict[str, Any] | None = None

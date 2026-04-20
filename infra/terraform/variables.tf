@@ -200,7 +200,7 @@ variable "db_skip_final_snapshot" {
 }
 
 variable "db_enable_local_access" {
-  description = "When true, place the RDS instance in public subnets, mark it publicly accessible, and allow ingress from db_local_access_cidrs for local testing."
+  description = "When true, create a public RDS clone from a snapshot of the primary database and allow direct PostgreSQL access from db_local_access_cidrs."
   type        = bool
   default     = false
 }

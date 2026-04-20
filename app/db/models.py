@@ -7,6 +7,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 
+AUTHZ_SCHEMA = "authz"
+
 
 class Tenant(Base):
     __tablename__ = "tenants"
@@ -38,6 +40,7 @@ class AppUser(Base):
     __tablename__ = "app_users"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     email: Mapped[str | None] = mapped_column(CITEXT, unique=True)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     cognito_sub: Mapped[str | None] = mapped_column(Text, unique=True)
@@ -49,7 +52,10 @@ class AppUser(Base):
 
 class TenantUserMembership(Base):
     __tablename__ = "tenant_user_memberships"
-    __table_args__ = (UniqueConstraint("tenant_id", "user_id", name="uq_tenant_user_memberships_tenant_id_user_id"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", name="uq_tenant_user_memberships_tenant_id_user_id"),
+        UniqueConstraint("user_id", name="uq_tenant_user_memberships_user_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
@@ -59,6 +65,110 @@ class TenantUserMembership(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class AuthzRole(Base):
+    __tablename__ = "roles"
+    __table_args__ = {"schema": AUTHZ_SCHEMA}
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    system_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class AuthzPermission(Base):
+    __tablename__ = "permissions"
+    __table_args__ = {"schema": AUTHZ_SCHEMA}
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    code: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class AuthzRolePermission(Base):
+    __tablename__ = "role_permissions"
+    __table_args__ = (
+        UniqueConstraint("role_id", "permission_id", name="uq_authz_role_permissions_role_permission"),
+        {"schema": AUTHZ_SCHEMA},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    role_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey(f"{AUTHZ_SCHEMA}.roles.id", ondelete="CASCADE"), nullable=False)
+    permission_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey(f"{AUTHZ_SCHEMA}.permissions.id", ondelete="CASCADE"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class AuthzUserRoleAssignment(Base):
+    __tablename__ = "user_role_assignments"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", "role_id", name="uq_authz_user_role_assignments"),
+        {"schema": AUTHZ_SCHEMA},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False)
+    role_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey(f"{AUTHZ_SCHEMA}.roles.id", ondelete="CASCADE"), nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    granted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    granted_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+
+class AuthzScopeGrant(Base):
+    __tablename__ = "scope_grants"
+    __table_args__ = {"schema": AUTHZ_SCHEMA}
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False)
+    role_assignment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey(f"{AUTHZ_SCHEMA}.user_role_assignments.id", ondelete="CASCADE"))
+    scope_type: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_value: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class AuthzRecordExceptionGrant(Base):
+    __tablename__ = "record_exception_grants"
+    __table_args__ = {"schema": AUTHZ_SCHEMA}
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False)
+    exception_code: Mapped[str] = mapped_column(Text, nullable=False)
+    record_type: Mapped[str | None] = mapped_column(Text)
+    record_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class AuthzSensitivityGrant(Base):
+    __tablename__ = "sensitivity_grants"
+    __table_args__ = {"schema": AUTHZ_SCHEMA}
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False)
+    sensitivity_tier: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    granted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_authz_user_role_assignments_tenant_user", AuthzUserRoleAssignment.tenant_id, AuthzUserRoleAssignment.user_id)
+Index("ix_authz_scope_grants_tenant_user_type", AuthzScopeGrant.tenant_id, AuthzScopeGrant.user_id, AuthzScopeGrant.scope_type)
+Index("ix_authz_record_exception_grants_tenant_user", AuthzRecordExceptionGrant.tenant_id, AuthzRecordExceptionGrant.user_id)
+Index("ix_authz_sensitivity_grants_tenant_user", AuthzSensitivityGrant.tenant_id, AuthzSensitivityGrant.user_id)
 
 
 class Institution(Base):
@@ -545,6 +655,240 @@ class StudentTask(Base):
 
 Index("ix_student_tasks_tenant_student_status", StudentTask.tenant_id, StudentTask.student_id, StudentTask.status)
 Index("ix_student_tasks_tenant_assigned_status", StudentTask.tenant_id, StudentTask.assigned_to_user_id, StudentTask.status)
+
+
+class ChecklistTemplate(Base):
+    __tablename__ = "checklist_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    population: Mapped[str] = mapped_column(Text, nullable=False)
+    program_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("programs.id", ondelete="SET NULL"))
+    start_term_code: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_checklist_templates_tenant_population_active", ChecklistTemplate.tenant_id, ChecklistTemplate.population, ChecklistTemplate.active)
+
+
+class ChecklistTemplateItem(Base):
+    __tablename__ = "checklist_template_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    template_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("checklist_templates.id", ondelete="CASCADE"), nullable=False)
+    code: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    document_type: Mapped[str | None] = mapped_column(Text)
+    review_required_default: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_checklist_template_items_template_sort", ChecklistTemplateItem.template_id, ChecklistTemplateItem.sort_order)
+
+
+class StudentChecklist(Base):
+    __tablename__ = "student_checklists"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    template_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("checklist_templates.id", ondelete="RESTRICT"), nullable=False)
+    population: Mapped[str] = mapped_column(Text, nullable=False)
+    completion_percent: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    one_item_away: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'incomplete'"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_checklists_tenant_student", StudentChecklist.tenant_id, StudentChecklist.student_id, unique=True)
+Index("ix_student_checklists_tenant_status", StudentChecklist.tenant_id, StudentChecklist.status)
+
+
+class StudentChecklistItem(Base):
+    __tablename__ = "student_checklist_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    student_checklist_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("student_checklists.id", ondelete="CASCADE"), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    template_item_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("checklist_template_items.id", ondelete="SET NULL"))
+    code: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'missing'"))
+    received_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    due_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    source_document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("document_uploads.id", ondelete="SET NULL"))
+    source_confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    updated_by_system: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_checklist_items_tenant_student_status", StudentChecklistItem.tenant_id, StudentChecklistItem.student_id, StudentChecklistItem.status)
+Index("ix_student_checklist_items_checklist", StudentChecklistItem.student_checklist_id, StudentChecklistItem.code)
+
+
+class StudentSignal(Base):
+    __tablename__ = "student_signals"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    signal_type: Mapped[str] = mapped_column(Text, nullable=False)
+    signal_label: Mapped[str] = mapped_column(Text, nullable=False)
+    signal_value: Mapped[str | None] = mapped_column(Text)
+    severity: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    detected_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+
+
+Index("ix_student_signals_tenant_student_active", StudentSignal.tenant_id, StudentSignal.student_id, StudentSignal.active)
+Index("ix_student_signals_tenant_type_active", StudentSignal.tenant_id, StudentSignal.signal_type, StudentSignal.active)
+
+
+class StudentPriorityScore(Base):
+    __tablename__ = "student_priority_scores"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    priority_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    priority_band: Mapped[str] = mapped_column(Text, nullable=False)
+    reason_code: Mapped[str] = mapped_column(Text, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_priority_scores_tenant_student", StudentPriorityScore.tenant_id, StudentPriorityScore.student_id, unique=True)
+Index("ix_student_priority_scores_tenant_band", StudentPriorityScore.tenant_id, StudentPriorityScore.priority_band)
+
+
+class StudentDecisionReadiness(Base):
+    __tablename__ = "student_decision_readiness"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    readiness_state: Mapped[str] = mapped_column(Text, nullable=False)
+    reason_code: Mapped[str] = mapped_column(Text, nullable=False)
+    reason_label: Mapped[str] = mapped_column(Text, nullable=False)
+    blocking_item_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    trust_blocked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    computed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_decision_readiness_tenant_student", StudentDecisionReadiness.tenant_id, StudentDecisionReadiness.student_id, unique=True)
+Index("ix_student_decision_readiness_tenant_state", StudentDecisionReadiness.tenant_id, StudentDecisionReadiness.readiness_state)
+
+
+class DocumentChecklistLink(Base):
+    __tablename__ = "document_checklist_links"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("document_uploads.id", ondelete="CASCADE"), nullable=False)
+    checklist_item_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("student_checklist_items.id", ondelete="CASCADE"), nullable=False)
+    match_confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    match_status: Mapped[str] = mapped_column(Text, nullable=False)
+    linked_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    linked_by: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+Index("ix_document_checklist_links_tenant_student", DocumentChecklistLink.tenant_id, DocumentChecklistLink.student_id)
+Index("ix_document_checklist_links_tenant_document", DocumentChecklistLink.tenant_id, DocumentChecklistLink.document_id)
+
+
+class DuplicateCandidate(Base):
+    __tablename__ = "duplicate_candidates"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    primary_student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    candidate_student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    confidence_score: Mapped[float] = mapped_column(Numeric(5, 4), nullable=False)
+    match_reasons_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'open'"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    resolved_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+
+Index("ix_duplicate_candidates_tenant_status", DuplicateCandidate.tenant_id, DuplicateCandidate.status)
+
+
+class DuplicateMergeAction(Base):
+    __tablename__ = "duplicate_merge_actions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    candidate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("duplicate_candidates.id", ondelete="CASCADE"), nullable=False)
+    resolved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    resolution: Mapped[str] = mapped_column(Text, nullable=False)
+    field_conflicts_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_duplicate_merge_actions_tenant_candidate", DuplicateMergeAction.tenant_id, DuplicateMergeAction.candidate_id)
+
+
+class StudentEnrollmentMilestone(Base):
+    __tablename__ = "student_enrollment_milestones"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    milestone_code: Mapped[str] = mapped_column(Text, nullable=False)
+    milestone_label: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    achieved_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_enrollment_milestones_tenant_student", StudentEnrollmentMilestone.tenant_id, StudentEnrollmentMilestone.student_id)
+
+
+class StudentYieldScore(Base):
+    __tablename__ = "student_yield_scores"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(Text)
+    computed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_yield_scores_tenant_student", StudentYieldScore.tenant_id, StudentYieldScore.student_id, unique=True)
+
+
+class StudentMeltScore(Base):
+    __tablename__ = "student_melt_scores"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(Text)
+    computed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_melt_scores_tenant_student", StudentMeltScore.tenant_id, StudentMeltScore.student_id, unique=True)
 
 
 class AuditEvent(Base):

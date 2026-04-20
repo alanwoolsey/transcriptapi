@@ -5,8 +5,9 @@ from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.db import get_db
 from app.db.models import AppUser, Tenant, TenantUserMembership
+from app.db.session import get_session_factory
+from app.services.rbac_service import AuthorizationProfile, RBACService
 from app.services.cognito_verifier import CognitoAccessTokenVerifier, TokenVerificationError
 
 
@@ -15,9 +16,11 @@ class AuthenticatedTenantContext:
     user: AppUser
     tenant: Tenant
     claims: dict
+    authorization: AuthorizationProfile
 
 
 verifier = CognitoAccessTokenVerifier()
+rbac_service = RBACService()
 
 
 def get_authorization_token(authorization: str | None = Header(default=None, alias="Authorization")) -> str:
@@ -44,7 +47,6 @@ def get_tenant_id(x_tenant_id: str | None = Header(default=None, alias="X-Tenant
 def get_current_tenant_context(
     tenant_id: UUID = Depends(get_tenant_id),
     token: str = Depends(get_authorization_token),
-    db: Session = Depends(get_db),
 ) -> AuthenticatedTenantContext:
     try:
         claims = verifier.verify(token)
@@ -53,25 +55,57 @@ def get_current_tenant_context(
 
     subject = claims.get("sub")
     username = claims.get("username")
-
-    stmt = (
-        select(AppUser, Tenant)
-        .join(TenantUserMembership, TenantUserMembership.user_id == AppUser.id)
-        .join(Tenant, Tenant.id == TenantUserMembership.tenant_id)
-        .where(
-            Tenant.id == tenant_id,
-            Tenant.status == "active",
-            AppUser.is_active.is_(True),
-            TenantUserMembership.status == "active",
-            or_(
-                AppUser.cognito_sub == subject,
-                AppUser.email == username,
-            ),
+    session_factory = get_session_factory()
+    with session_factory() as db:
+        stmt = (
+            select(AppUser, Tenant, TenantUserMembership.role)
+            .join(TenantUserMembership, TenantUserMembership.user_id == AppUser.id)
+            .join(Tenant, Tenant.id == TenantUserMembership.tenant_id)
+            .where(
+                Tenant.id == tenant_id,
+                Tenant.status == "active",
+                AppUser.tenant_id == tenant_id,
+                AppUser.is_active.is_(True),
+                TenantUserMembership.status == "active",
+                or_(
+                    AppUser.cognito_sub == subject,
+                    AppUser.email == username,
+                ),
+            )
+            .limit(1)
         )
-        .limit(1)
-    )
-    row = db.execute(stmt).first()
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User is not authorized for this tenant.")
-    user, tenant = row
-    return AuthenticatedTenantContext(user=user, tenant=tenant, claims=claims)
+        row = db.execute(stmt).first()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User is not authorized for this tenant.")
+        if len(row) == 2:
+            user, tenant = row
+            membership_role = None
+        else:
+            user, tenant, membership_role = row
+        authorization = rbac_service.resolve_profile(
+            db,
+            tenant_id=tenant.id,
+            user_id=user.id,
+            membership_role=membership_role,
+        )
+        db.expunge(user)
+        db.expunge(tenant)
+        return AuthenticatedTenantContext(user=user, tenant=tenant, claims=claims, authorization=authorization)
+
+
+def require_permission(permission_code: str):
+    def dependency(auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context)) -> AuthenticatedTenantContext:
+        if not auth_context.authorization.can(permission_code):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Missing permission: {permission_code}")
+        return auth_context
+
+    return dependency
+
+
+def require_sensitivity_tier(tier: str):
+    def dependency(auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context)) -> AuthenticatedTenantContext:
+        if not auth_context.authorization.can_access_tier(tier):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Missing sensitivity tier: {tier}")
+        return auth_context
+
+    return dependency

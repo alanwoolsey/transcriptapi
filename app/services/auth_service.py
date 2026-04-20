@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from botocore.exceptions import ClientError
-from sqlalchemy import case, select
+from sqlalchemy import case, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -40,7 +40,10 @@ class AuthService:
     def login(self, db: Session, payload: LoginRequest) -> AuthChallengeResponse | AuthSuccessResponse:
         resolved = self._resolve_user(db, payload.username)
         response = self._initiate_auth(payload.username, payload.password)
-        return self._build_auth_response(resolved, response)
+        auth_response = self._build_auth_response(resolved, response)
+        if isinstance(auth_response, AuthSuccessResponse):
+            self._activate_local_user(db, resolved.user.email, resolved.tenant.id)
+        return auth_response
 
     def complete_new_password(
         self,
@@ -53,7 +56,10 @@ class AuthService:
             new_password=payload.new_password,
             session=payload.session,
         )
-        return self._build_auth_response(resolved, response)
+        auth_response = self._build_auth_response(resolved, response)
+        if isinstance(auth_response, AuthSuccessResponse):
+            self._activate_local_user(db, resolved.user.email, resolved.tenant.id)
+        return auth_response
 
     def change_password(self, payload: ChangePasswordRequest) -> None:
         try:
@@ -61,6 +67,92 @@ class AuthService:
                 AccessToken=payload.access_token,
                 PreviousPassword=payload.previous_password,
                 ProposedPassword=payload.proposed_password,
+            )
+        except ClientError as exc:
+            raise self._map_cognito_error(exc) from exc
+
+    def admin_create_user(
+        self,
+        *,
+        email: str,
+        display_name: str,
+        temporary_password: str | None = None,
+        send_invite: bool = True,
+    ) -> dict:
+        if not settings.cognito_user_pool_id:
+            raise RuntimeError("COGNITO_USER_POOL_ID is not configured.")
+        try:
+            params = {
+                "UserPoolId": settings.cognito_user_pool_id,
+                "Username": email,
+                "DesiredDeliveryMediums": ["EMAIL"],
+                "UserAttributes": [
+                    {"Name": "email", "Value": email},
+                    {"Name": "email_verified", "Value": "true"},
+                    {"Name": "name", "Value": display_name},
+                ],
+            }
+            if temporary_password:
+                params["TemporaryPassword"] = temporary_password
+            if not send_invite:
+                params["MessageAction"] = "SUPPRESS"
+            return self._cognito_client.admin_create_user(**params)
+        except ClientError as exc:
+            raise self._map_cognito_error(exc) from exc
+
+    def admin_resend_invite(self, *, email: str) -> dict:
+        if not settings.cognito_user_pool_id:
+            raise RuntimeError("COGNITO_USER_POOL_ID is not configured.")
+        try:
+            return self._cognito_client.admin_create_user(
+                UserPoolId=settings.cognito_user_pool_id,
+                Username=email,
+                DesiredDeliveryMediums=["EMAIL"],
+                MessageAction="RESEND",
+            )
+        except ClientError as exc:
+            raise self._map_cognito_error(exc) from exc
+
+    def admin_reset_user_password(self, *, email: str) -> dict:
+        if not settings.cognito_user_pool_id:
+            raise RuntimeError("COGNITO_USER_POOL_ID is not configured.")
+        try:
+            return self._cognito_client.admin_reset_user_password(
+                UserPoolId=settings.cognito_user_pool_id,
+                Username=email,
+            )
+        except ClientError as exc:
+            raise self._map_cognito_error(exc) from exc
+
+    def admin_get_user(self, *, email: str) -> dict:
+        if not settings.cognito_user_pool_id:
+            raise RuntimeError("COGNITO_USER_POOL_ID is not configured.")
+        try:
+            return self._cognito_client.admin_get_user(
+                UserPoolId=settings.cognito_user_pool_id,
+                Username=email,
+            )
+        except ClientError as exc:
+            raise self._map_cognito_error(exc) from exc
+
+    def admin_update_user(
+        self,
+        *,
+        current_email: str,
+        email: str,
+        display_name: str,
+    ) -> None:
+        if not settings.cognito_user_pool_id:
+            raise RuntimeError("COGNITO_USER_POOL_ID is not configured.")
+        try:
+            self._cognito_client.admin_update_user_attributes(
+                UserPoolId=settings.cognito_user_pool_id,
+                Username=current_email,
+                UserAttributes=[
+                    {"Name": "email", "Value": email},
+                    {"Name": "email_verified", "Value": "true"},
+                    {"Name": "name", "Value": display_name},
+                ],
             )
         except ClientError as exc:
             raise self._map_cognito_error(exc) from exc
@@ -80,9 +172,13 @@ class AuthService:
             .join(Tenant, Tenant.id == TenantUserMembership.tenant_id)
             .where(
                 AppUser.email == email,
-                AppUser.is_active.is_(True),
+                AppUser.tenant_id == Tenant.id,
                 Tenant.status == "active",
-                TenantUserMembership.status == "active",
+                or_(
+                    AppUser.is_active.is_(True),
+                    TenantUserMembership.status == "invited",
+                ),
+                TenantUserMembership.status.in_(["active", "invited"]),
             )
             .order_by(
                 case((TenantUserMembership.is_default.is_(True), 0), else_=1),
@@ -95,6 +191,27 @@ class AuthService:
             raise LocalUserNotFoundError(email)
         user, tenant = row
         return ResolvedAppUser(user=user, tenant=tenant)
+
+    def _activate_local_user(self, db: Session, email: str | None, tenant_id) -> None:
+        if db is None or not email:
+            return
+        user = db.execute(
+            select(AppUser).where(AppUser.email == email, AppUser.tenant_id == tenant_id).limit(1)
+        ).scalar_one_or_none()
+        membership = db.execute(
+            select(TenantUserMembership)
+            .where(TenantUserMembership.tenant_id == tenant_id, TenantUserMembership.user_id == user.id)
+            .limit(1)
+        ).scalar_one_or_none() if user is not None else None
+        changed = False
+        if user is not None and not user.is_active:
+            user.is_active = True
+            changed = True
+        if membership is not None and membership.status != "active":
+            membership.status = "active"
+            changed = True
+        if changed:
+            db.commit()
 
     def _initiate_auth(self, username: str, password: str) -> dict:
         try:
@@ -130,7 +247,9 @@ class AuthService:
                 tenant_id=resolved.tenant.id,
                 tenant_name=resolved.tenant.name,
                 tenant_code=resolved.tenant.slug,
+                user_id=(str(resolved.user.id) if getattr(resolved.user, "id", None) else None),
                 challenge_name="NEW_PASSWORD_REQUIRED",
+                challenge="NEW_PASSWORD_REQUIRED",
                 session=cognito_response["Session"],
             )
 
@@ -139,6 +258,7 @@ class AuthService:
             tenant_id=resolved.tenant.id,
             tenant_name=resolved.tenant.name,
             tenant_code=resolved.tenant.slug,
+            user_id=(str(resolved.user.id) if getattr(resolved.user, "id", None) else None),
             access_token=auth_result["AccessToken"],
             id_token=auth_result["IdToken"],
             refresh_token=auth_result.get("RefreshToken"),
@@ -152,6 +272,10 @@ class AuthService:
 
         if error_code in {"NotAuthorizedException", "UserNotConfirmedException"}:
             return CognitoAuthError(error_message, 401)
+        if error_code in {"UsernameExistsException"}:
+            return CognitoAuthError(error_message, 409)
+        if error_code in {"UserNotFoundException"}:
+            return CognitoAuthError(error_message, 404)
         if error_code in {"PasswordResetRequiredException", "InvalidPasswordException"}:
             return CognitoAuthError(error_message, 400)
         if error_code in {"InvalidParameterException", "CodeMismatchException", "ExpiredCodeException"}:

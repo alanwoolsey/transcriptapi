@@ -34,11 +34,16 @@ class TrustService:
             items.append(
                 TrustCaseItem(
                     id=str(trust_flag.id),
+                    studentId=(str(student.id) if student else None),
                     student=self._student_name(student, demographics),
+                    documentId=str(trust_flag.transcript_id),
+                    document="Official transcript",
                     severity=self._title_case(trust_flag.severity),
                     signal=self._title_case(trust_flag.flag_type),
                     evidence=trust_flag.reason,
                     status=self._title_case(trust_flag.status),
+                    owner=None,
+                    openedAt=self._format_time(trust_flag.detected_at),
                 )
             )
         return items
@@ -56,11 +61,16 @@ class TrustService:
             items.append(
                 TrustCaseItem(
                     id=f"TRUST-{str(transcript.id)[:8]}",
+                    studentId=(str(student.id) if student else None),
                     student=self._student_name(student, demographics),
+                    documentId=str(transcript.id),
+                    document="Official transcript",
                     severity="High",
                     signal="Fraudulent transcript",
                     evidence=transcript.notes or "Transcript was flagged as fraudulent and requires manual review.",
                     status=self._title_case(transcript.status) or "Quarantined",
+                    owner=None,
+                    openedAt=self._format_time(transcript.created_at),
                 )
             )
         return items
@@ -82,3 +92,8 @@ class TrustService:
         if not value:
             return ""
         return value.replace("_", " ").replace("-", " ").title()
+
+    def _format_time(self, value) -> str | None:
+        if value is None:
+            return None
+        return value.isoformat().replace("+00:00", "Z")

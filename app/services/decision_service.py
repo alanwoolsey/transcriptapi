@@ -67,7 +67,7 @@ class _DecisionBundle:
     transcript: Transcript
     demographics: TranscriptDemographics | None
     parse_run: TranscriptParseRun | None
-    upload: DocumentUpload
+    upload: DocumentUpload | None
     match: TranscriptStudentMatch | None
     student: Student | None
 
@@ -80,7 +80,6 @@ class DecisionService:
     def list_decisions(self, tenant_id: UUID) -> list[DecisionWorkbenchItem]:
         session_factory = self.session_factory()
         with session_factory() as session:
-            self._heal_transcript_data(session, tenant_id)
             packets = session.execute(
                 select(DecisionPacket)
                 .where(DecisionPacket.tenant_id == tenant_id)
@@ -93,7 +92,7 @@ class DecisionService:
             }
 
             items: list[DecisionWorkbenchItem] = [self._packet_to_item(packet) for packet in packets]
-            bundles = self._load_bundles(session, tenant_id)
+            bundles = self._load_list_bundles(session, tenant_id)
             grouped: dict[str, list[_DecisionBundle]] = defaultdict(list)
             for bundle in bundles:
                 if bundle.transcript.id in packet_backed_transcript_ids:
@@ -142,7 +141,6 @@ class DecisionService:
     def get_decision_detail(self, tenant_id: UUID, decision_id: UUID) -> DecisionDetailResponse:
         session_factory = self.session_factory()
         with session_factory() as session:
-            self._heal_transcript_data(session, tenant_id)
             packet = self._get_packet(session, tenant_id, decision_id)
             if packet is not None:
                 return self._build_detail_from_packet(session, packet)
@@ -272,28 +270,18 @@ class DecisionService:
                 return []
             return self._load_timeline(session, tenant_id, packet.id)
 
-    def _load_bundles(self, session: Session, tenant_id: UUID) -> list[_DecisionBundle]:
+    def _load_list_bundles(self, session: Session, tenant_id: UUID) -> list[_DecisionBundle]:
         transcript_stmt = (
-            select(Transcript, TranscriptDemographics, DocumentUpload, Student)
-            .join(DocumentUpload, DocumentUpload.id == Transcript.document_upload_id)
+            select(Transcript, TranscriptDemographics, Student)
             .outerjoin(TranscriptDemographics, TranscriptDemographics.transcript_id == Transcript.id)
             .outerjoin(Student, Student.id == Transcript.student_id)
             .where(Transcript.tenant_id == tenant_id)
             .order_by(Transcript.created_at.desc())
         )
         transcript_rows = session.execute(transcript_stmt).all()
-        transcript_ids = [transcript.id for transcript, _, _, _ in transcript_rows]
+        transcript_ids = [transcript.id for transcript, _, _ in transcript_rows]
         if not transcript_ids:
             return []
-
-        parse_runs = session.execute(
-            select(TranscriptParseRun)
-            .where(TranscriptParseRun.tenant_id == tenant_id, TranscriptParseRun.transcript_id.in_(transcript_ids))
-            .order_by(TranscriptParseRun.started_at.desc())
-        ).scalars().all()
-        latest_parse_run_by_transcript: dict[UUID, TranscriptParseRun] = {}
-        for parse_run in parse_runs:
-            latest_parse_run_by_transcript.setdefault(parse_run.transcript_id, parse_run)
 
         matches = session.execute(
             select(TranscriptStudentMatch)
@@ -311,12 +299,12 @@ class DecisionService:
             _DecisionBundle(
                 transcript=transcript,
                 demographics=demographics,
-                parse_run=latest_parse_run_by_transcript.get(transcript.id),
-                upload=upload,
+                parse_run=None,
+                upload=None,
                 match=latest_match_by_transcript.get(transcript.id),
                 student=student,
             )
-            for transcript, demographics, upload, student in transcript_rows
+            for transcript, demographics, student in transcript_rows
         ]
 
     def _heal_transcript_data(self, session: Session, tenant_id: UUID) -> None:
@@ -353,10 +341,40 @@ class DecisionService:
             session.commit()
 
     def _load_bundle_by_transcript_id(self, session: Session, tenant_id: UUID, transcript_id: UUID) -> _DecisionBundle | None:
-        for bundle in self._load_bundles(session, tenant_id):
-            if bundle.transcript.id == transcript_id:
-                return bundle
-        return None
+        row = session.execute(
+            select(Transcript, TranscriptDemographics, Student)
+            .outerjoin(TranscriptDemographics, TranscriptDemographics.transcript_id == Transcript.id)
+            .outerjoin(Student, Student.id == Transcript.student_id)
+            .where(Transcript.tenant_id == tenant_id, Transcript.id == transcript_id)
+            .limit(1)
+        ).one_or_none()
+        if row is None:
+            return None
+
+        transcript, demographics, student = row
+        parse_run = session.execute(
+            select(TranscriptParseRun)
+            .where(TranscriptParseRun.tenant_id == tenant_id, TranscriptParseRun.transcript_id == transcript_id)
+            .order_by(TranscriptParseRun.started_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        match = session.execute(
+            select(TranscriptStudentMatch)
+            .where(
+                TranscriptStudentMatch.tenant_id == tenant_id,
+                TranscriptStudentMatch.transcript_id == transcript_id,
+            )
+            .order_by(TranscriptStudentMatch.decided_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        return _DecisionBundle(
+            transcript=transcript,
+            demographics=demographics,
+            parse_run=parse_run,
+            upload=None,
+            match=match,
+            student=student,
+        )
 
     def _get_packet(self, session: Session, tenant_id: UUID, decision_id: UUID) -> DecisionPacket | None:
         return session.execute(
@@ -411,6 +429,7 @@ class DecisionService:
             .join(TenantUserMembership, TenantUserMembership.user_id == AppUser.id)
             .where(
                 AppUser.id == user_id,
+                AppUser.tenant_id == tenant_id,
                 AppUser.is_active.is_(True),
                 TenantUserMembership.tenant_id == tenant_id,
                 TenantUserMembership.status == "active",
@@ -600,6 +619,9 @@ class DecisionService:
             creditEstimate=packet.credit_estimate,
             readiness=packet.readiness,
             reason=packet.reason,
+            status=packet.status,
+            queue=packet.queue_name,
+            updatedAt=self._isoformat(packet.updated_at),
         )
 
     def _bundle_to_item(self, bundle: _DecisionBundle) -> DecisionWorkbenchItem:
@@ -611,6 +633,9 @@ class DecisionService:
             creditEstimate=self._credit_estimate(bundle),
             readiness=self._readiness(bundle),
             reason=self._reason(bundle),
+            status="Draft",
+            queue=DEFAULT_QUEUE_NAME,
+            updatedAt=self._isoformat(bundle.transcript.updated_at or bundle.transcript.created_at),
         )
 
     def _decision_key(self, bundle: _DecisionBundle) -> str:

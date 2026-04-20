@@ -5,7 +5,7 @@ from uuid import UUID
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
-from app.db.models import AuditEvent, Transcript, TranscriptParseRun, TrustFlag, WorkflowCase
+from app.db.models import AuditEvent, Student, Transcript, TranscriptParseRun, TrustFlag, WorkflowCase
 from app.db.session import get_session_factory
 from app.models.dashboard_models import (
     DashboardActivityItem,
@@ -15,46 +15,65 @@ from app.models.dashboard_models import (
     DashboardRoutingMixItem,
     DashboardStat,
 )
-from app.services.student_360_service import Student360Service
 
 
 class DashboardService:
-    def __init__(self, session_factory=None, student_service: Student360Service | None = None) -> None:
+    def __init__(self, session_factory=None) -> None:
         self.session_factory = session_factory or get_session_factory
-        self.student_service = student_service or Student360Service(session_factory=session_factory)
 
     def get_dashboard(self, tenant_id: UUID) -> DashboardResponse:
+        return DashboardResponse(
+            stats=self.get_stats(tenant_id),
+            funnel=self.get_funnel(tenant_id),
+            routing_mix=self.get_routing_mix(tenant_id),
+            agents=self.get_agents(tenant_id),
+            activity=self.get_activity(tenant_id),
+        )
+
+    def get_stats(self, tenant_id: UUID) -> list[DashboardStat]:
         session_factory = self.session_factory()
         with session_factory() as session:
             now = datetime.now(timezone.utc)
             last_30_days = now - timedelta(days=30)
             previous_30_days = last_30_days - timedelta(days=30)
+            student_summaries = self._load_student_summaries(session, tenant_id)
+            return self._build_stats(session, tenant_id, student_summaries, last_30_days, previous_30_days)
+
+    def get_funnel(self, tenant_id: UUID) -> list[DashboardFunnelItem]:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            student_summaries = self._load_student_summaries(session, tenant_id)
+            return self._build_funnel(session, tenant_id, student_summaries)
+
+    def get_routing_mix(self, tenant_id: UUID) -> list[DashboardRoutingMixItem]:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            return self._build_routing_mix(session, tenant_id)
+
+    def get_agents(self, tenant_id: UUID) -> list[DashboardAgentItem]:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            now = datetime.now(timezone.utc)
+            last_30_days = now - timedelta(days=30)
+            student_summaries = self._load_student_summaries(session, tenant_id)
+            return self._build_agents(session, tenant_id, student_summaries, last_30_days)
+
+    def get_activity(self, tenant_id: UUID) -> list[DashboardActivityItem]:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            now = datetime.now(timezone.utc)
             last_7_days = now - timedelta(days=7)
-
-            students = self.student_service.list_students(tenant_id)
-            stats = self._build_stats(session, tenant_id, students, last_30_days, previous_30_days)
-            funnel = self._build_funnel(session, tenant_id, students)
-            routing_mix = self._build_routing_mix(session, tenant_id)
-            agents = self._build_agents(session, tenant_id, students, last_30_days)
-            activity = self._build_activity(session, tenant_id, last_7_days, now)
-
-            return DashboardResponse(
-                stats=stats,
-                funnel=funnel,
-                routing_mix=routing_mix,
-                agents=agents,
-                activity=activity,
-            )
+            return self._build_activity(session, tenant_id, last_7_days, now)
 
     def _build_stats(
         self,
         session: Session,
         tenant_id: UUID,
-        students,
+        student_summaries: list[dict[str, str | int | float]],
         last_30_days: datetime,
         previous_30_days: datetime,
     ) -> list[DashboardStat]:
-        prospect_count = len(students)
+        prospect_count = len(student_summaries)
         current_transcripts = self._count_transcripts(session, tenant_id, last_30_days, None)
         previous_transcripts = self._count_transcripts(session, tenant_id, previous_30_days, last_30_days)
         current_parse_runs = self._count_parse_runs(session, tenant_id, last_30_days, None, status="completed")
@@ -89,13 +108,13 @@ class DashboardService:
             ),
         ]
 
-    def _build_funnel(self, session: Session, tenant_id: UUID, students) -> list[DashboardFunnelItem]:
-        prospects = len(students)
-        transcript_evaluated = sum(1 for student in students if student.transcriptsCount > 0)
-        best_fit = sum(1 for student in students if student.fitScore >= 75)
-        application_started = sum(1 for student in students if student.depositLikelihood >= 50)
-        admitted = sum(1 for student in students if student.stage.lower() in {"decision-ready", "high intent"})
-        deposited = sum(1 for student in students if student.depositLikelihood >= 70)
+    def _build_funnel(self, session: Session, tenant_id: UUID, student_summaries: list[dict[str, str | int | float]]) -> list[DashboardFunnelItem]:
+        prospects = len(student_summaries)
+        transcript_evaluated = sum(1 for student in student_summaries if int(student["transcriptsCount"]) > 0)
+        best_fit = sum(1 for student in student_summaries if int(student["fitScore"]) >= 75)
+        application_started = sum(1 for student in student_summaries if int(student["depositLikelihood"]) >= 50)
+        admitted = sum(1 for student in student_summaries if str(student["stage"]).lower() in {"decision-ready", "high intent"})
+        deposited = sum(1 for student in student_summaries if int(student["depositLikelihood"]) >= 70)
 
         return [
             DashboardFunnelItem(step="Prospects", count=prospects),
@@ -149,9 +168,9 @@ class DashboardService:
             if value > 0
         ]
 
-    def _build_agents(self, session: Session, tenant_id: UUID, students, last_30_days: datetime) -> list[DashboardAgentItem]:
-        high_fit = sum(1 for student in students if student.fitScore >= 80)
-        likely_deposit = sum(1 for student in students if student.depositLikelihood >= 70)
+    def _build_agents(self, session: Session, tenant_id: UUID, student_summaries: list[dict[str, str | int | float]], last_30_days: datetime) -> list[DashboardAgentItem]:
+        high_fit = sum(1 for student in student_summaries if int(student["fitScore"]) >= 80)
+        likely_deposit = sum(1 for student in student_summaries if int(student["depositLikelihood"]) >= 70)
         recruiter_rate = round((likely_deposit / high_fit) * 100) if high_fit else 0
 
         parse_durations = []
@@ -189,6 +208,49 @@ class DashboardService:
                 summary="Tracks fraudulent transcripts and trust holds before outcomes are released.",
             ),
         ]
+
+    def _load_student_summaries(self, session: Session, tenant_id: UUID) -> list[dict[str, str | int | float]]:
+        transcript_stats = (
+            select(
+                Transcript.student_id.label("student_id"),
+                func.count(Transcript.id).label("transcripts_count"),
+                func.max(Transcript.parser_confidence).label("max_parser_confidence"),
+            )
+            .where(Transcript.tenant_id == tenant_id, Transcript.student_id.is_not(None))
+            .group_by(Transcript.student_id)
+            .subquery()
+        )
+        stmt = (
+            select(
+                Student.current_stage,
+                Student.risk_level,
+                Student.latest_cumulative_gpa,
+                transcript_stats.c.transcripts_count,
+                transcript_stats.c.max_parser_confidence,
+            )
+            .outerjoin(transcript_stats, transcript_stats.c.student_id == Student.id)
+            .where(Student.tenant_id == tenant_id)
+        )
+        rows = session.execute(stmt).all()
+        summaries: list[dict[str, str | int | float]] = []
+        for stage, risk_level, gpa, transcripts_count, max_parser_confidence in rows:
+            transcript_count = int(transcripts_count or 0)
+            fit_score = self._estimate_fit_score_from_summary(gpa, transcript_count, max_parser_confidence)
+            deposit_likelihood = self._estimate_deposit_likelihood_from_summary(
+                risk_level,
+                gpa,
+                transcript_count,
+                max_parser_confidence,
+            )
+            summaries.append(
+                {
+                    "stage": self._title_case(stage or "decision-ready"),
+                    "fitScore": fit_score,
+                    "depositLikelihood": deposit_likelihood,
+                    "transcriptsCount": transcript_count,
+                }
+            )
+        return summaries
 
     def _build_activity(self, session: Session, tenant_id: UUID, last_7_days: datetime, now: datetime) -> list[DashboardActivityItem]:
         items: list[DashboardActivityItem] = []
@@ -350,3 +412,45 @@ class DashboardService:
         if not value:
             return ""
         return value.replace("_", " ").title()
+
+    def _estimate_fit_score_from_summary(
+        self,
+        gpa: float | int | str | None,
+        transcripts_count: int,
+        parser_confidence: float | int | str | None,
+    ) -> int:
+        gpa_value = self._to_float(gpa)
+        if gpa_value >= 3.5:
+            return 92
+        if gpa_value >= 3.0:
+            return 84
+        if gpa_value >= 2.5:
+            return 72
+        if transcripts_count > 0:
+            confidence = self._to_float(parser_confidence) * 100
+            fallback_confidence = confidence if confidence > 0 else 70.0
+            return max(55, min(90, int(fallback_confidence)))
+        return 65
+
+    def _estimate_deposit_likelihood_from_summary(
+        self,
+        risk_level: str | None,
+        gpa: float | int | str | None,
+        transcripts_count: int,
+        parser_confidence: float | int | str | None,
+    ) -> int:
+        risk = (risk_level or "").lower()
+        if risk == "high":
+            return 20
+        base = self._estimate_fit_score_from_summary(gpa, transcripts_count, parser_confidence) - 18
+        if risk == "medium":
+            base -= 12
+        return max(10, min(85, base))
+
+    def _to_float(self, value: float | int | str | None, fallback: float = 0.0) -> float:
+        if value is None:
+            return fallback
+        try:
+            return round(float(value), 2)
+        except Exception:
+            return fallback

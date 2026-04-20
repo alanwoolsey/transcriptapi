@@ -36,6 +36,10 @@ locals {
   alb_name                 = trimsuffix(substr("${local.name_prefix}-alb", 0, 32), "-")
   target_group_name        = trimsuffix(substr("${local.name_prefix}-tg", 0, 32), "-")
   db_secret_name           = "${local.name_prefix}/database"
+  active_db_host           = var.db_enable_local_access ? aws_db_instance.postgres_public[0].address : aws_db_instance.postgres.address
+  active_db_port           = var.db_enable_local_access ? aws_db_instance.postgres_public[0].port : aws_db_instance.postgres.port
+  active_db_name           = var.db_enable_local_access ? aws_db_instance.postgres_public[0].db_name : aws_db_instance.postgres.db_name
+  active_db_public         = var.db_enable_local_access
 }
 
 resource "aws_vpc" "this" {
@@ -202,33 +206,6 @@ resource "aws_security_group" "database" {
   description = "PostgreSQL ingress from ECS service"
   vpc_id      = aws_vpc.this.id
 
-  ingress {
-    from_port       = 5432
-    to_port         = 5432
-    protocol        = "tcp"
-    security_groups = [aws_security_group.service.id]
-  }
-
-  dynamic "ingress" {
-    for_each = var.db_enable_local_access ? [1] : []
-    content {
-      from_port   = 5432
-      to_port     = 5432
-      protocol    = "tcp"
-      cidr_blocks = var.db_local_access_cidrs
-    }
-  }
-
-  dynamic "ingress" {
-    for_each = var.db_enable_bastion ? [1] : []
-    content {
-      from_port       = 5432
-      to_port         = 5432
-      protocol        = "tcp"
-      security_groups = [aws_security_group.db_bastion[0].id]
-    }
-  }
-
   egress {
     from_port   = 0
     to_port     = 0
@@ -241,8 +218,37 @@ resource "aws_security_group" "database" {
   })
 }
 
+resource "aws_security_group_rule" "database_from_service" {
+  type                     = "ingress"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.database.id
+  source_security_group_id = aws_security_group.service.id
+}
+
+resource "aws_security_group_rule" "database_from_local" {
+  count             = var.db_enable_local_access ? length(var.db_local_access_cidrs) : 0
+  type              = "ingress"
+  from_port         = 5432
+  to_port           = 5432
+  protocol          = "tcp"
+  security_group_id = aws_security_group.database.id
+  cidr_blocks       = [var.db_local_access_cidrs[count.index]]
+}
+
+resource "aws_security_group_rule" "database_from_bastion" {
+  count                    = var.db_enable_bastion ? 1 : 0
+  type                     = "ingress"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.database.id
+  source_security_group_id = aws_security_group.db_bastion[0].id
+}
+
 resource "aws_key_pair" "db_bastion" {
-  count      = var.db_enable_bastion ? 1 : 0
+  count      = var.db_enable_bastion && var.db_bastion_public_key_path != null ? 1 : 0
   key_name   = "${local.name_prefix}-db-bastion"
   public_key = file(var.db_bastion_public_key_path)
 
@@ -252,17 +258,11 @@ resource "aws_key_pair" "db_bastion" {
 }
 
 resource "aws_security_group" "db_bastion" {
-  count       = var.db_enable_bastion ? 1 : 0
-  name        = "${local.name_prefix}-db-bastion-sg"
-  description = "SSH access for DB bastion"
-  vpc_id      = aws_vpc.this.id
-
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = var.db_local_access_cidrs
-  }
+  count                  = var.db_enable_bastion ? 1 : 0
+  name                   = "${local.name_prefix}-db-bastion-sg"
+  description            = "SSH access for DB bastion"
+  vpc_id                 = aws_vpc.this.id
+  revoke_rules_on_delete = true
 
   egress {
     from_port   = 0
@@ -276,6 +276,38 @@ resource "aws_security_group" "db_bastion" {
   })
 }
 
+resource "aws_iam_role" "db_bastion" {
+  count = var.db_enable_bastion ? 1 : 0
+  name  = "${local.name_prefix}-db-bastion-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "db_bastion_ssm" {
+  count      = var.db_enable_bastion ? 1 : 0
+  role       = aws_iam_role.db_bastion[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "db_bastion" {
+  count = var.db_enable_bastion ? 1 : 0
+  name  = "${local.name_prefix}-db-bastion-profile"
+  role  = aws_iam_role.db_bastion[0].name
+}
+
 resource "aws_instance" "db_bastion" {
   count                       = var.db_enable_bastion ? 1 : 0
   ami                         = data.aws_ami.al2023.id
@@ -283,7 +315,8 @@ resource "aws_instance" "db_bastion" {
   subnet_id                   = aws_subnet.public[0].id
   vpc_security_group_ids      = [aws_security_group.db_bastion[0].id]
   associate_public_ip_address = true
-  key_name                    = aws_key_pair.db_bastion[0].key_name
+  iam_instance_profile        = aws_iam_instance_profile.db_bastion[0].name
+  key_name                    = length(aws_key_pair.db_bastion) > 0 ? aws_key_pair.db_bastion[0].key_name : null
 
   tags = merge(local.common_tags, {
     Name = "${local.name_prefix}-db-bastion"
@@ -302,6 +335,16 @@ resource "aws_db_subnet_group" "this" {
 
   tags = merge(local.common_tags, {
     Name = "${local.name_prefix}-db-subnets"
+  })
+}
+
+resource "aws_db_subnet_group" "public" {
+  count      = var.db_enable_local_access ? 1 : 0
+  name       = "${local.name_prefix}-db-subnets-public"
+  subnet_ids = aws_subnet.public[*].id
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-db-subnets-public"
   })
 }
 
@@ -333,7 +376,7 @@ resource "aws_db_instance" "postgres" {
   parameter_group_name         = aws_db_parameter_group.postgres.name
   backup_retention_period      = var.db_backup_retention_period
   multi_az                     = var.db_multi_az
-  publicly_accessible          = var.db_enable_local_access
+  publicly_accessible          = false
   storage_encrypted            = true
   deletion_protection          = var.db_deletion_protection
   skip_final_snapshot          = var.db_skip_final_snapshot
@@ -347,6 +390,39 @@ resource "aws_db_instance" "postgres" {
   })
 }
 
+resource "aws_db_snapshot" "local_access_source" {
+  count                  = var.db_enable_local_access ? 1 : 0
+  db_instance_identifier = aws_db_instance.postgres.identifier
+  db_snapshot_identifier = "${local.name_prefix}-local-access-snapshot"
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-local-access-snapshot"
+  })
+}
+
+resource "aws_db_instance" "postgres_public" {
+  count                        = var.db_enable_local_access ? 1 : 0
+  identifier                   = "${local.name_prefix}-postgres-public"
+  snapshot_identifier          = aws_db_snapshot.local_access_source[0].id
+  instance_class               = var.db_instance_class
+  port                         = 5432
+  db_subnet_group_name         = aws_db_subnet_group.public[0].name
+  vpc_security_group_ids       = [aws_security_group.database.id]
+  parameter_group_name         = aws_db_parameter_group.postgres.name
+  publicly_accessible          = true
+  auto_minor_version_upgrade   = true
+  apply_immediately            = true
+  copy_tags_to_snapshot        = true
+  deletion_protection          = var.db_deletion_protection
+  skip_final_snapshot          = var.db_skip_final_snapshot
+  backup_retention_period      = var.db_backup_retention_period
+  performance_insights_enabled = false
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-postgres-public"
+  })
+}
+
 resource "aws_secretsmanager_secret" "database" {
   name = local.db_secret_name
 
@@ -357,9 +433,9 @@ resource "aws_secretsmanager_secret_version" "database" {
   secret_id = aws_secretsmanager_secret.database.id
   secret_string = jsonencode({
     engine   = "postgres"
-    host     = aws_db_instance.postgres.address
-    port     = aws_db_instance.postgres.port
-    dbname   = aws_db_instance.postgres.db_name
+    host     = local.active_db_host
+    port     = local.active_db_port
+    dbname   = local.active_db_name
     username = var.db_username
     password = random_password.database.result
   })
@@ -643,6 +719,7 @@ resource "aws_ecs_task_definition" "service" {
         { name = "APP_ENV", value = var.app_env },
         { name = "APP_HOST", value = "0.0.0.0" },
         { name = "APP_PORT", value = tostring(var.container_port) },
+        { name = "DATABASE_ENDPOINT_HOST", value = local.active_db_host },
         { name = "CORS_ALLOWED_ORIGINS", value = jsonencode(var.cors_allowed_origins) },
         { name = "AWS_REGION", value = var.aws_region },
         { name = "COGNITO_USER_POOL_ID", value = var.cognito_user_pool_id },

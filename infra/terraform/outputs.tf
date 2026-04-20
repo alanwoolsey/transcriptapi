@@ -35,12 +35,22 @@ output "certificate_arn" {
 
 output "database_endpoint" {
   description = "RDS PostgreSQL endpoint hostname."
-  value       = aws_db_instance.postgres.address
+  value       = local.active_db_host
+}
+
+output "database_port" {
+  description = "RDS PostgreSQL port."
+  value       = local.active_db_port
+}
+
+output "database_publicly_accessible" {
+  description = "Whether the RDS instance is publicly reachable."
+  value       = local.active_db_public
 }
 
 output "database_name" {
   description = "Application database name."
-  value       = var.db_name
+  value       = local.active_db_name
 }
 
 output "database_secret_arn" {
@@ -51,6 +61,26 @@ output "database_secret_arn" {
 output "db_bastion_public_ip" {
   description = "Public IP of the temporary DB bastion when enabled."
   value       = try(aws_instance.db_bastion[0].public_ip, null)
+}
+
+output "db_bastion_instance_id" {
+  description = "EC2 instance ID of the DB bastion when enabled."
+  value       = try(aws_instance.db_bastion[0].id, null)
+}
+
+output "db_bastion_ssm_port_forward_command" {
+  description = "AWS CLI command to start a local port forward to PostgreSQL through Session Manager."
+  value       = try("aws ssm start-session --target ${aws_instance.db_bastion[0].id} --document-name AWS-StartPortForwardingSessionToRemoteHost --parameters host=${aws_db_instance.postgres.address},portNumber=5432,localPortNumber=15432", null)
+}
+
+output "database_private_endpoint" {
+  description = "Original private RDS endpoint hostname."
+  value       = aws_db_instance.postgres.address
+}
+
+output "database_public_clone_endpoint" {
+  description = "Public clone RDS endpoint hostname when direct local access is enabled."
+  value       = try(aws_db_instance.postgres_public[0].address, null)
 }
 
 output "acm_validation_records" {

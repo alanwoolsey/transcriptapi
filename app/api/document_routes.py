@@ -1,0 +1,38 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.api.dependencies import AuthenticatedTenantContext, get_current_tenant_context
+from app.db import get_db
+from app.models.ops_models import DocumentExceptionsResponse, LinkChecklistItemRequest, StudentChecklistResponse
+from app.services.admissions_ops_service import AdmissionsOpsNotFoundError, AdmissionsOpsService, AdmissionsOpsValidationError
+
+router = APIRouter(prefix="/documents", tags=["documents"])
+admissions_ops_service = AdmissionsOpsService()
+
+
+@router.post("/{document_id}/link-checklist-item", response_model=StudentChecklistResponse)
+def link_document_to_checklist_item(
+    document_id: str,
+    payload: LinkChecklistItemRequest,
+    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    db: Session = Depends(get_db),
+) -> StudentChecklistResponse:
+    try:
+        return admissions_ops_service.link_document_to_checklist_item(
+            db=db,
+            tenant_id=auth_context.tenant.id,
+            actor_user_id=auth_context.user.id,
+            document_id=document_id,
+            payload=payload,
+        )
+    except AdmissionsOpsNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AdmissionsOpsValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/exceptions", response_model=DocumentExceptionsResponse)
+def get_document_exceptions(
+    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+) -> DocumentExceptionsResponse:
+    return admissions_ops_service.get_document_exceptions(auth_context.tenant.id)

@@ -28,31 +28,19 @@ def test_list_students_returns_records(monkeypatch):
             {
                 "id": "student-1",
                 "name": "Hunter Haymore",
-                "preferredName": "Hunter",
-                "email": None,
-                "phone": None,
                 "program": "Transcript intake",
                 "institutionGoal": "Grantsville High",
                 "stage": "Decision-ready",
                 "risk": "Low",
-                "advisor": "Unassigned",
-                "city": "Location pending",
+                "fitScore": 86,
+                "depositLikelihood": 61,
+                "summary": "Latest transcript parsed from Grantsville High. Outcome draft prepared for review.",
                 "gpa": 0.0,
                 "creditsAccepted": 0,
                 "transcriptsCount": 1,
-                "fitScore": 86,
-                "depositLikelihood": 61,
-                "lastActivity": "2026-04-19T15:21:59Z",
+                "advisor": "Unassigned",
                 "tags": ["Transcript intake", "Low", "Decision-ready"],
-                "summary": "Latest transcript parsed from Grantsville High. Outcome draft prepared for review.",
-                "checklist": [{"label": "Identity matched", "done": True}],
-                "transcripts": [],
-                "termGpa": [],
-                "recommendation": {
-                    "summary": "Latest transcript is ready for counselor review.",
-                    "fitNarrative": "Current transcript evidence from Grantsville High was parsed successfully and is available for review.",
-                    "nextBestAction": "Open the student record and review the latest transcript outcome.",
-                },
+                "nextBestAction": "Open the student record and review the latest transcript outcome.",
             }
         ],
     )
@@ -65,6 +53,7 @@ def test_list_students_returns_records(monkeypatch):
     assert len(payload) == 1
     assert payload[0]["name"] == "Hunter Haymore"
     assert payload[0]["institutionGoal"] == "Grantsville High"
+    assert "transcripts" not in payload[0]
 
 
 def test_list_students_passes_search_query(monkeypatch):
@@ -84,3 +73,65 @@ def test_list_students_passes_search_query(monkeypatch):
 
     assert response.status_code == 200
     assert captured["q"] == "hunter"
+
+
+def test_get_student_returns_detail_record(monkeypatch):
+    from app.api import student_routes
+
+    captured = {}
+
+    def fake_get_student(tenant_id, student_id):
+        captured["tenant_id"] = tenant_id
+        captured["student_id"] = student_id
+        return {
+            "id": student_id,
+            "name": "Hunter Haymore",
+            "preferredName": "Hunter",
+            "email": None,
+            "phone": None,
+            "program": "Transcript intake",
+            "institutionGoal": "Grantsville High",
+            "stage": "Decision-ready",
+            "risk": "Low",
+            "fitScore": 86,
+            "depositLikelihood": 61,
+            "summary": "Latest transcript parsed from Grantsville High. Outcome draft prepared for review.",
+            "gpa": 0.0,
+            "creditsAccepted": 0,
+            "transcriptsCount": 1,
+            "advisor": "Unassigned",
+            "tags": ["Transcript intake", "Low", "Decision-ready"],
+            "nextBestAction": "Open the student record and review the latest transcript outcome.",
+            "city": "Location pending",
+            "lastActivity": "2026-04-19T15:21:59Z",
+            "checklist": [{"label": "Identity matched", "done": True}],
+            "transcripts": [],
+            "termGpa": [],
+            "recommendation": {
+                "summary": "Latest transcript is ready for counselor review.",
+                "fitNarrative": "Current transcript evidence from Grantsville High was parsed successfully and is available for review.",
+                "nextBestAction": "Open the student record and review the latest transcript outcome.",
+            },
+        }
+
+    monkeypatch.setattr(student_routes.student_service, "get_student", fake_get_student)
+
+    client = TestClient(_build_test_app())
+    response = client.get("/api/v1/students/student-1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == "student-1"
+    assert payload["recommendation"]["nextBestAction"] == payload["nextBestAction"]
+    assert captured["student_id"] == "student-1"
+
+
+def test_get_student_returns_404_when_missing(monkeypatch):
+    from app.api import student_routes
+
+    monkeypatch.setattr(student_routes.student_service, "get_student", lambda tenant_id, student_id: None)
+
+    client = TestClient(_build_test_app())
+    response = client.get("/api/v1/students/missing-student")
+
+    assert response.status_code == 404

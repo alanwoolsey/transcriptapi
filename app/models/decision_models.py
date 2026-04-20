@@ -9,6 +9,9 @@ class DecisionWorkbenchItem(BaseModel):
     creditEstimate: int
     readiness: str
     reason: str
+    status: str | None = None
+    queue: str | None = None
+    updatedAt: str | None = None
 
 
 class CreateDecisionRequest(BaseModel):
@@ -33,6 +36,7 @@ class DecisionStudentSummary(BaseModel):
 
 
 class DecisionProgramSummary(BaseModel):
+    id: str | None = None
     name: str
 
 

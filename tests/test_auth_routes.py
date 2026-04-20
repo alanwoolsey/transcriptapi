@@ -169,3 +169,47 @@ def test_auth_service_prefers_default_active_membership(monkeypatch):
 
     assert resolved.user.email == "user@example.com"
     assert resolved.tenant.slug == "default-tenant"
+
+
+def test_auth_service_admin_create_user_calls_cognito(monkeypatch):
+    service = AuthService()
+    calls = {}
+
+    class FakeClient:
+        def admin_create_user(self, **kwargs):
+            calls.update(kwargs)
+            return {"User": {"Username": kwargs["Username"]}}
+
+    monkeypatch.setattr(service, "_client", FakeClient())
+    monkeypatch.setattr("app.services.auth_service.settings.cognito_user_pool_id", "pool-123")
+
+    response = service.admin_create_user(
+        email="new@example.edu",
+        display_name="New User",
+        temporary_password="TempPass123!",
+        send_invite=True,
+    )
+
+    assert response["User"]["Username"] == "new@example.edu"
+    assert calls["UserPoolId"] == "pool-123"
+    assert calls["DesiredDeliveryMediums"] == ["EMAIL"]
+    assert calls["Username"] == "new@example.edu"
+    assert calls["TemporaryPassword"] == "TempPass123!"
+
+
+def test_auth_service_admin_reset_user_password_calls_cognito(monkeypatch):
+    service = AuthService()
+    calls = {}
+
+    class FakeClient:
+        def admin_reset_user_password(self, **kwargs):
+            calls.update(kwargs)
+            return {"ok": True}
+
+    monkeypatch.setattr(service, "_client", FakeClient())
+    monkeypatch.setattr("app.services.auth_service.settings.cognito_user_pool_id", "pool-123")
+
+    response = service.admin_reset_user_password(email="new@example.edu")
+
+    assert response == {"ok": True}
+    assert calls == {"UserPoolId": "pool-123", "Username": "new@example.edu"}

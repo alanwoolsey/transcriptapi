@@ -11,8 +11,10 @@ from sqlalchemy.orm import Session
 from app.db.models import AppUser, DocumentUpload, Institution, Program, Student, Transcript, TranscriptDemographics, TranscriptParseRun
 from app.db.session import get_session_factory
 from app.models.student_models import (
+    Student360ListRecord,
     Student360Record,
     StudentChecklistItem,
+    StudentProgramSummary,
     StudentRecommendation,
     StudentTermGpa,
     StudentTimelineStep,
@@ -35,21 +37,56 @@ class Student360Service:
         self.session_factory = session_factory or get_session_factory
         self.student_resolution = StudentResolutionService()
 
-    def list_students(self, tenant_id: UUID, q: str | None = None) -> list[Student360Record]:
+    def list_students(self, tenant_id: UUID, q: str | None = None) -> list[Student360ListRecord]:
         session_factory = self.session_factory()
         with session_factory() as session:
-            self._heal_transcript_data(session, tenant_id)
             canonical_students = self._list_canonical_students(session, tenant_id, q)
             if canonical_students:
                 return canonical_students
             return self._list_transcript_derived_students(session, tenant_id, q)
 
-    def _list_canonical_students(self, session: Session, tenant_id: UUID, q: str | None) -> list[Student360Record]:
+    def get_student(self, tenant_id: UUID, student_id: str) -> Student360Record | None:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            canonical_student = self._get_canonical_student(session, tenant_id, student_id)
+            if canonical_student is not None:
+                return canonical_student
+
+            return self._get_transcript_derived_student(session, tenant_id, student_id)
+
+    def _list_canonical_students(self, session: Session, tenant_id: UUID, q: str | None) -> list[Student360ListRecord]:
+        transcript_stats = (
+            select(
+                Transcript.student_id.label("student_id"),
+                func.count(Transcript.id).label("transcripts_count"),
+                func.max(Transcript.parser_confidence).label("max_parser_confidence"),
+            )
+            .where(Transcript.tenant_id == tenant_id, Transcript.student_id.is_not(None))
+            .group_by(Transcript.student_id)
+            .subquery()
+        )
+        latest_institution_name = (
+            select(TranscriptDemographics.institution_name)
+            .join(Transcript, Transcript.id == TranscriptDemographics.transcript_id)
+            .where(Transcript.tenant_id == tenant_id, Transcript.student_id == Student.id)
+            .order_by(Transcript.created_at.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
         stmt = (
-            select(Student, Program, Institution, AppUser)
+            select(
+                Student,
+                Program,
+                Institution,
+                AppUser,
+                transcript_stats.c.transcripts_count,
+                transcript_stats.c.max_parser_confidence,
+                latest_institution_name.label("latest_institution_name"),
+            )
             .outerjoin(Program, Program.id == Student.target_program_id)
             .outerjoin(Institution, Institution.id == Student.target_institution_id)
             .outerjoin(AppUser, AppUser.id == Student.advisor_user_id)
+            .outerjoin(transcript_stats, transcript_stats.c.student_id == Student.id)
             .where(Student.tenant_id == tenant_id)
             .order_by(Student.latest_activity_at.desc().nullslast(), Student.created_at.desc())
         )
@@ -58,42 +95,154 @@ class Student360Service:
         if not rows:
             return []
 
-        student_ids = [row[0].id for row in rows]
-        transcript_map = self._load_transcripts_for_students(session, tenant_id, student_ids)
-
-        records: list[Student360Record] = []
-        for student, program, institution, advisor in rows:
-            transcripts = transcript_map.get(student.id, [])
+        records: list[Student360ListRecord] = []
+        for student, program, institution, advisor, transcripts_count, max_parser_confidence, latest_institution in rows:
+            institution_goal = institution.name if institution else self._safe_str(latest_institution, "Unknown institution")
+            transcript_count = int(transcripts_count or 0)
+            gpa_value = self._to_float(student.latest_cumulative_gpa)
+            fit_score = self._estimate_fit_score_from_summary(gpa_value, transcript_count, max_parser_confidence)
+            deposit_likelihood = self._estimate_deposit_likelihood_from_summary(
+                student.risk_level,
+                gpa_value,
+                transcript_count,
+                max_parser_confidence,
+            )
+            next_best_action = self._build_next_best_action(student.risk_level, student.current_stage, institution_goal)
             records.append(
-                Student360Record(
+                Student360ListRecord(
                     id=str(student.id),
                     name=self._join_name(student.first_name, student.last_name, fallback="Unknown Student"),
-                    preferredName=student.preferred_name or student.first_name or "Student",
+                    preferredName=student.preferred_name or student.first_name,
                     email=student.email,
                     phone=student.phone,
-                    program=(program.name if program else "Transcript intake"),
-                    institutionGoal=(institution.name if institution else self._latest_institution_name(transcripts)),
+                    program=StudentProgramSummary(id=(str(program.id) if program else None), name=(program.name if program else "Transcript intake")),
+                    studentType=self._student_type(student.accepted_credits),
+                    institutionGoal=institution_goal,
                     stage=self._title_case(student.current_stage or "decision-ready"),
                     risk=self._title_case(student.risk_level or "low"),
                     advisor=advisor.display_name if advisor else "Unassigned",
                     city=self._format_location(student.city, student.state, student.country),
-                    gpa=self._to_float(student.latest_cumulative_gpa),
+                    fitScore=fit_score,
+                    depositLikelihood=deposit_likelihood,
+                    summary=student.summary or self._default_summary_from_institution(institution_goal, student.risk_level),
+                    gpa=gpa_value,
                     creditsAccepted=self._to_float(student.accepted_credits, 0),
-                    transcriptsCount=len(transcripts),
-                    fitScore=self._estimate_fit_score(student.latest_cumulative_gpa, transcripts),
-                    depositLikelihood=self._estimate_deposit_likelihood(student.risk_level, student.latest_cumulative_gpa, transcripts),
+                    transcriptsCount=transcript_count,
                     lastActivity=self._format_timestamp(student.latest_activity_at or student.updated_at),
                     tags=self._build_tags(program.name if program else None, student.risk_level, student.current_stage),
-                    summary=student.summary or self._default_summary(transcripts, student.risk_level),
-                    checklist=self._build_checklist(transcripts, student.risk_level),
-                    transcripts=transcripts,
-                    termGpa=self._build_term_gpa(transcripts),
-                    recommendation=self._build_recommendation(transcripts, student.risk_level, student.current_stage),
+                    nextBestAction=next_best_action,
                 )
             )
         return records
 
-    def _list_transcript_derived_students(self, session: Session, tenant_id: UUID, q: str | None) -> list[Student360Record]:
+    def _list_transcript_derived_students(self, session: Session, tenant_id: UUID, q: str | None) -> list[Student360ListRecord]:
+        stmt = (
+            select(Transcript, TranscriptDemographics)
+            .outerjoin(TranscriptDemographics, TranscriptDemographics.transcript_id == Transcript.id)
+            .where(Transcript.tenant_id == tenant_id)
+            .order_by(Transcript.created_at.desc())
+        )
+        rows = session.execute(stmt).all()
+        grouped: dict[str, list[tuple[Transcript, TranscriptDemographics | None]]] = defaultdict(list)
+        for transcript, demographics in rows:
+            key = self._derive_student_key(transcript, demographics)
+            grouped[key].append((transcript, demographics))
+
+        records: list[Student360ListRecord] = []
+        for key, transcript_rows in grouped.items():
+            latest_transcript, latest_demographics = transcript_rows[0]
+            name = self._demographic_name(latest_demographics)
+            program = "Transcript intake"
+            institution_goal = self._safe_str(latest_demographics.institution_name if latest_demographics else None, "Unknown institution")
+            risk = self._derive_risk_from_transcripts([item[0] for item in transcript_rows])
+            stage = self._derive_stage_from_transcripts([item[0] for item in transcript_rows])
+            gpa_value = self._derive_gpa_from_demographics([item[1] for item in transcript_rows])
+            transcript_count = len(transcript_rows)
+            fit_score = self._estimate_fit_score_from_summary(gpa_value, transcript_count, latest_transcript.parser_confidence)
+            deposit_likelihood = self._estimate_deposit_likelihood_from_summary(
+                risk,
+                gpa_value,
+                transcript_count,
+                latest_transcript.parser_confidence,
+            )
+            record = Student360ListRecord(
+                id=key,
+                name=name,
+                preferredName=name.split(" ")[0] if name else None,
+                email=None,
+                phone=None,
+                program=StudentProgramSummary(id=None, name=program),
+                studentType="transfer" if self._derive_credits_from_demographics([item[1] for item in transcript_rows]) > 0 else "first_year",
+                institutionGoal=institution_goal,
+                stage=stage,
+                risk=risk,
+                advisor="Unassigned",
+                city=self._format_location(None, latest_demographics.institution_state if latest_demographics else None, latest_demographics.institution_country if latest_demographics else None),
+                fitScore=fit_score,
+                depositLikelihood=deposit_likelihood,
+                summary=self._default_summary_from_institution(institution_goal, risk),
+                gpa=gpa_value,
+                creditsAccepted=self._derive_credits_from_demographics([item[1] for item in transcript_rows]),
+                transcriptsCount=transcript_count,
+                lastActivity=self._format_timestamp(latest_transcript.updated_at),
+                tags=self._build_tags(program, risk, stage),
+                nextBestAction=self._build_next_best_action(risk, stage, institution_goal),
+            )
+            if self._matches_search(record, q):
+                records.append(record)
+        return records
+
+    def _get_canonical_student(self, session: Session, tenant_id: UUID, student_id: str) -> Student360Record | None:
+        try:
+            student_uuid = UUID(student_id)
+        except ValueError:
+            return None
+
+        stmt = (
+            select(Student, Program, Institution, AppUser)
+            .outerjoin(Program, Program.id == Student.target_program_id)
+            .outerjoin(Institution, Institution.id == Student.target_institution_id)
+            .outerjoin(AppUser, AppUser.id == Student.advisor_user_id)
+            .where(Student.tenant_id == tenant_id, Student.id == student_uuid)
+        )
+        row = session.execute(stmt).one_or_none()
+        if row is None:
+            return None
+
+        student, program, institution, advisor = row
+        transcript_map = self._load_transcripts_for_students(session, tenant_id, [student.id])
+        transcripts = transcript_map.get(student.id, [])
+        recommendation = self._build_recommendation(transcripts, student.risk_level, student.current_stage)
+        institution_goal = institution.name if institution else self._latest_institution_name(transcripts)
+        return Student360Record(
+            id=str(student.id),
+            name=self._join_name(student.first_name, student.last_name, fallback="Unknown Student"),
+            preferredName=student.preferred_name or student.first_name or "Student",
+            email=student.email,
+            phone=student.phone,
+            program=StudentProgramSummary(id=(str(program.id) if program else None), name=(program.name if program else "Transcript intake")),
+            studentType=self._student_type(student.accepted_credits),
+            institutionGoal=institution_goal,
+            stage=self._title_case(student.current_stage or "decision-ready"),
+            risk=self._title_case(student.risk_level or "low"),
+            fitScore=self._estimate_fit_score(student.latest_cumulative_gpa, transcripts),
+            depositLikelihood=self._estimate_deposit_likelihood(student.risk_level, student.latest_cumulative_gpa, transcripts),
+            summary=student.summary or self._default_summary(transcripts, student.risk_level),
+            gpa=self._to_float(student.latest_cumulative_gpa),
+            creditsAccepted=self._to_float(student.accepted_credits, 0),
+            transcriptsCount=len(transcripts),
+            advisor=advisor.display_name if advisor else "Unassigned",
+            tags=self._build_tags(program.name if program else None, student.risk_level, student.current_stage),
+            nextBestAction=recommendation.nextBestAction,
+            city=self._format_location(student.city, student.state, student.country),
+            lastActivity=self._format_timestamp(student.latest_activity_at or student.updated_at),
+            checklist=self._build_checklist(transcripts, student.risk_level),
+            transcripts=transcripts,
+            termGpa=self._build_term_gpa(transcripts),
+            recommendation=recommendation,
+        )
+
+    def _get_transcript_derived_student(self, session: Session, tenant_id: UUID, student_id: str) -> Student360Record | None:
         stmt = (
             select(Transcript, DocumentUpload, TranscriptDemographics, TranscriptParseRun)
             .join(DocumentUpload, DocumentUpload.id == Transcript.document_upload_id)
@@ -102,48 +251,52 @@ class Student360Service:
             .where(Transcript.tenant_id == tenant_id)
             .order_by(Transcript.created_at.desc())
         )
-        rows = session.execute(stmt).all()
         grouped: dict[str, list[_TranscriptBundle]] = defaultdict(list)
-        for transcript, upload, demographics, parse_run in rows:
+        for transcript, upload, demographics, parse_run in session.execute(stmt).all():
             key = self._derive_student_key(transcript, demographics)
             grouped[key].append(_TranscriptBundle(transcript=transcript, upload=upload, demographics=demographics, parse_run=parse_run))
 
-        records: list[Student360Record] = []
-        for key, bundles in grouped.items():
-            latest = bundles[0]
-            name = self._demographic_name(latest.demographics)
-            program = "Transcript intake"
-            institution_goal = self._safe_str(latest.demographics.institution_name if latest.demographics else None, "Unknown institution")
-            risk = self._derive_risk_from_bundles(bundles)
-            stage = self._derive_stage_from_bundles(bundles)
-            record = Student360Record(
-                id=key,
-                name=name,
-                preferredName=(latest.demographics.student_first_name if latest.demographics and latest.demographics.student_first_name else name.split(" ")[0]),
-                email=None,
-                phone=None,
-                program=program,
-                institutionGoal=institution_goal,
-                stage=stage,
-                risk=risk,
-                advisor="Unassigned",
-                city=self._format_location(None, latest.demographics.institution_state if latest.demographics else None, latest.demographics.institution_country if latest.demographics else None),
-                gpa=self._derive_gpa_from_bundles(bundles),
-                creditsAccepted=self._derive_credits_from_bundles(bundles),
-                transcriptsCount=len(bundles),
-                fitScore=self._estimate_fit_score(self._derive_gpa_from_bundles(bundles), self._map_transcript_records(bundles)),
-                depositLikelihood=self._estimate_deposit_likelihood(risk, self._derive_gpa_from_bundles(bundles), self._map_transcript_records(bundles)),
-                lastActivity=self._format_timestamp(latest.transcript.updated_at),
-                tags=self._build_tags(program, risk, stage),
-                summary=self._default_summary(self._map_transcript_records(bundles), risk),
-                checklist=self._build_checklist(self._map_transcript_records(bundles), risk),
-                transcripts=self._map_transcript_records(bundles),
-                termGpa=self._build_term_gpa(self._map_transcript_records(bundles)),
-                recommendation=self._build_recommendation(self._map_transcript_records(bundles), risk, stage),
-            )
-            if self._matches_search(record, q):
-                records.append(record)
-        return records
+        bundles = grouped.get(student_id)
+        if not bundles:
+            return None
+
+        latest = bundles[0]
+        name = self._demographic_name(latest.demographics)
+        transcripts = self._map_transcript_records(bundles)
+        risk = self._derive_risk_from_bundles(bundles)
+        stage = self._derive_stage_from_bundles(bundles)
+        recommendation = self._build_recommendation(transcripts, risk, stage)
+        return Student360Record(
+            id=student_id,
+            name=name,
+            preferredName=(latest.demographics.student_first_name if latest.demographics and latest.demographics.student_first_name else name.split(" ")[0]),
+            email=None,
+            phone=None,
+            program=StudentProgramSummary(id=None, name="Transcript intake"),
+            studentType="transfer" if self._derive_credits_from_bundles(bundles) > 0 else "first_year",
+            institutionGoal=self._safe_str(latest.demographics.institution_name if latest.demographics else None, "Unknown institution"),
+            stage=stage,
+            risk=risk,
+            fitScore=self._estimate_fit_score(self._derive_gpa_from_bundles(bundles), transcripts),
+            depositLikelihood=self._estimate_deposit_likelihood(risk, self._derive_gpa_from_bundles(bundles), transcripts),
+            summary=self._default_summary(transcripts, risk),
+            gpa=self._derive_gpa_from_bundles(bundles),
+            creditsAccepted=self._derive_credits_from_bundles(bundles),
+            transcriptsCount=len(bundles),
+            advisor="Unassigned",
+            tags=self._build_tags("Transcript intake", risk, stage),
+            nextBestAction=recommendation.nextBestAction,
+            city=self._format_location(
+                None,
+                latest.demographics.institution_state if latest.demographics else None,
+                latest.demographics.institution_country if latest.demographics else None,
+            ),
+            lastActivity=self._format_timestamp(latest.transcript.updated_at),
+            checklist=self._build_checklist(transcripts, risk),
+            transcripts=transcripts,
+            termGpa=self._build_term_gpa(transcripts),
+            recommendation=recommendation,
+        )
 
     def _load_transcripts_for_students(self, session: Session, tenant_id: UUID, student_ids: list[UUID]) -> dict[UUID, list[StudentTranscriptRecord]]:
         if not student_ids:
@@ -274,6 +427,11 @@ class Student360Service:
             return f"Latest transcript from {institution} is blocked pending trust review."
         return f"Latest transcript parsed from {institution}. Outcome draft prepared for review."
 
+    def _default_summary_from_institution(self, institution: str, risk_level: str | None) -> str:
+        if (risk_level or "").lower() == "high":
+            return f"Latest transcript from {institution} is blocked pending trust review."
+        return f"Latest transcript parsed from {institution}. Outcome draft prepared for review."
+
     def _build_tags(self, program: str | None, risk_level: str | None, stage: str | None) -> list[str]:
         tags: list[str] = []
         if program and program.strip():
@@ -306,6 +464,47 @@ class Student360Service:
             base -= 12
         return max(10, min(85, base))
 
+    def _estimate_fit_score_from_summary(
+        self,
+        gpa: Decimal | float | None,
+        transcripts_count: int,
+        parser_confidence: Decimal | float | None,
+    ) -> int:
+        gpa_value = self._to_float(gpa)
+        if gpa_value >= 3.5:
+            return 92
+        if gpa_value >= 3.0:
+            return 84
+        if gpa_value >= 2.5:
+            return 72
+        if transcripts_count > 0:
+            confidence = self._to_float(parser_confidence) * 100
+            fallback_confidence = confidence if confidence > 0 else 70.0
+            return max(55, min(90, int(fallback_confidence)))
+        return 65
+
+    def _estimate_deposit_likelihood_from_summary(
+        self,
+        risk_level: str | None,
+        gpa: Decimal | float | None,
+        transcripts_count: int,
+        parser_confidence: Decimal | float | None,
+    ) -> int:
+        risk = (risk_level or "").lower()
+        if risk == "high":
+            return 20
+        base = self._estimate_fit_score_from_summary(gpa, transcripts_count, parser_confidence) - 18
+        if risk == "medium":
+            base -= 12
+        return max(10, min(85, base))
+
+    def _build_next_best_action(self, risk_level: str | None, stage: str | None, institution: str) -> str:
+        if (risk_level or "").lower() == "high":
+            return "Review flagged transcript evidence and request an official replacement if needed."
+        if (stage or "").lower().replace("_", " ") in {"pending evidence", "trust hold"}:
+            return f"Resolve outstanding transcript issues for {institution} before releasing an outcome."
+        return "Open the student record and review the latest transcript outcome."
+
     def _derive_student_key(self, transcript: Transcript, demographics: TranscriptDemographics | None) -> str:
         if transcript.student_id:
             return str(transcript.student_id)
@@ -335,6 +534,23 @@ class Student360Service:
             return "Medium"
         return "Low"
 
+    def _derive_stage_from_transcripts(self, transcripts: list[Transcript]) -> str:
+        latest = transcripts[0]
+        if latest.is_fraudulent:
+            return "Trust hold"
+        if latest.status in {"failed", "processing"}:
+            return "Pending evidence"
+        return "Decision-ready"
+
+    def _derive_risk_from_transcripts(self, transcripts: list[Transcript]) -> str:
+        latest = transcripts[0]
+        if latest.is_fraudulent:
+            return "High"
+        confidence = self._to_float(latest.parser_confidence)
+        if confidence and confidence < 0.8:
+            return "Medium"
+        return "Low"
+
     def _derive_gpa_from_bundles(self, bundles: list[_TranscriptBundle]) -> float:
         for bundle in bundles:
             if bundle.demographics and bundle.demographics.cumulative_gpa is not None:
@@ -345,6 +561,18 @@ class Student360Service:
         for bundle in bundles:
             if bundle.demographics and bundle.demographics.total_credits_earned is not None:
                 return self._to_float(bundle.demographics.total_credits_earned, 0)
+        return 0.0
+
+    def _derive_gpa_from_demographics(self, demographics_rows: list[TranscriptDemographics | None]) -> float:
+        for demographics in demographics_rows:
+            if demographics and demographics.cumulative_gpa is not None:
+                return self._to_float(demographics.cumulative_gpa)
+        return 0.0
+
+    def _derive_credits_from_demographics(self, demographics_rows: list[TranscriptDemographics | None]) -> float:
+        for demographics in demographics_rows:
+            if demographics and demographics.total_credits_earned is not None:
+                return self._to_float(demographics.total_credits_earned, 0)
         return 0.0
 
     def _apply_student_search(self, stmt: Select, q: str | None) -> Select:
@@ -365,7 +593,7 @@ class Student360Service:
             )
         )
 
-    def _matches_search(self, record: Student360Record, q: str | None) -> bool:
+    def _matches_search(self, record: Student360ListRecord | Student360Record, q: str | None) -> bool:
         if not q or not q.strip():
             return True
         haystack = " ".join(
@@ -412,6 +640,9 @@ class Student360Service:
     def _join_name(self, first: str | None, last: str | None, fallback: str) -> str:
         name = " ".join(part for part in [first or "", last or ""] if part.strip()).strip()
         return name or fallback
+
+    def _student_type(self, accepted_credits: Decimal | float | int | str | None) -> str:
+        return "transfer" if self._to_float(accepted_credits, 0.0) > 0 else "first_year"
 
     def _format_location(self, city: str | None, state: str | None, country: str | None) -> str:
         parts = [part for part in [city, state, country] if part]

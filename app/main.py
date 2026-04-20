@@ -8,9 +8,13 @@ from fastapi.responses import JSONResponse
 from app.api.auth_routes import router as auth_router
 from app.api.decision_routes import router as decision_router
 from app.api.dashboard_routes import router as dashboard_router
+from app.api.document_routes import router as document_router
+from app.api.me_routes import router as me_router
+from app.api.operations_routes import router as operations_router
 from app.api.student_routes import router as student_router
 from app.api.trust_routes import router as trust_router
 from app.api.routes import router as transcript_router
+from app.api.work_routes import router as work_router
 from app.api.workflow_routes import router as workflow_router
 from app.core.config import settings
 from app.db import run_migrations
@@ -58,7 +62,11 @@ def health() -> dict:
 app.include_router(auth_router)
 app.include_router(decision_router, prefix="/api/v1")
 app.include_router(dashboard_router, prefix="/api/v1")
+app.include_router(document_router, prefix="/api/v1")
+app.include_router(me_router, prefix="/api/v1")
+app.include_router(operations_router, prefix="/api/v1")
 app.include_router(student_router, prefix="/api/v1")
 app.include_router(trust_router, prefix="/api/v1")
 app.include_router(transcript_router, prefix="/api/v1")
+app.include_router(work_router, prefix="/api/v1")
 app.include_router(workflow_router, prefix="/api/v1")
