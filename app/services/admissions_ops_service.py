@@ -9,6 +9,7 @@ from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    AgentRun,
     AppUser,
     AuditEvent,
     ChecklistTemplate,
@@ -25,6 +26,7 @@ from app.db.models import (
     StudentDecisionReadiness,
     StudentPriorityScore,
     StudentSignal,
+    StudentWorkState,
     Transcript,
     TranscriptDemographics,
     TranscriptProcessingFailure,
@@ -46,6 +48,7 @@ from app.models.ops_models import (
     WorkSummaryCounts,
     WorkSummaryResponse,
 )
+from app.services.work_state_projector import WorkStateProjector
 
 
 class AdmissionsOpsNotFoundError(Exception):
@@ -69,6 +72,7 @@ class _ChecklistContext:
 class AdmissionsOpsService:
     def __init__(self, session_factory=None) -> None:
         self.session_factory = session_factory or get_session_factory
+        self.work_state_projector = WorkStateProjector(session_factory=self.session_factory)
 
     def get_student_checklist(self, tenant_id: UUID, student_id: str) -> list[ChecklistItemResponse]:
         session_factory = self.session_factory()
@@ -141,6 +145,7 @@ class AdmissionsOpsService:
                     "readiness_state": context.readiness.readiness_state,
                 },
             )
+        self.work_state_projector.refresh_student_projection(db, tenant_id=tenant_id, student_id=context.student.id)
         db.commit()
         return self._serialize_checklist_items(context.items)
 
@@ -152,13 +157,17 @@ class AdmissionsOpsService:
             return self._serialize_readiness(context.student, context.readiness)
 
     def get_work_summary(self, tenant_id: UUID) -> WorkSummaryResponse:
+        self.work_state_projector.ensure_tenant_projection(tenant_id)
         session_factory = self.session_factory()
         with session_factory() as session:
-            states = self._sync_tenant_students(session, tenant_id)
+            rows = session.execute(
+                select(StudentWorkState.section, func.count())
+                .where(StudentWorkState.tenant_id == tenant_id)
+                .group_by(StudentWorkState.section)
+            ).all()
             counts = {"attention": 0, "close": 0, "ready": 0, "exceptions": 0}
-            for context in states:
-                section = self._section_for_student(context)
-                counts[section] += 1
+            for section, count in rows:
+                counts[str(section)] = int(count)
             session.commit()
             return WorkSummaryResponse(
                 summary=WorkSummaryCounts(
@@ -182,10 +191,18 @@ class AdmissionsOpsService:
         limit: int = 50,
         offset: int = 0,
     ) -> WorkItemsResponse:
+        self.work_state_projector.ensure_tenant_projection(tenant_id)
         session_factory = self.session_factory()
         with session_factory() as session:
-            contexts = self._sync_tenant_students(session, tenant_id)
-            work_items = [self._build_work_item(session, tenant_id, context) for context in contexts]
+            projected_rows = session.execute(
+                select(StudentWorkState)
+                .where(StudentWorkState.tenant_id == tenant_id)
+                .order_by(
+                    StudentWorkState.priority_score.desc().nullslast(),
+                    StudentWorkState.projected_at.desc(),
+                )
+            ).scalars().all()
+            work_items = [self._build_projected_work_item(row) for row in projected_rows]
             filtered = [
                 item for item in work_items
                 if self._matches_work_filters(item, section=section, population=population, owner=owner, priority=priority, aging_bucket=aging_bucket, q=q)
@@ -287,57 +304,89 @@ class AdmissionsOpsService:
                     "readiness_state": context.readiness.readiness_state,
                 },
             )
+        self.work_state_projector.refresh_student_projection(db, tenant_id=tenant_id, student_id=context.student.id)
         db.commit()
         return self._serialize_checklist_items(context.items)
 
     def get_document_exceptions(self, tenant_id: UUID) -> DocumentExceptionsResponse:
         session_factory = self.session_factory()
         with session_factory() as session:
-            self._sync_tenant_students(session, tenant_id)
             items: list[DocumentExceptionItem] = []
 
             link_rows = session.execute(
-                select(DocumentChecklistLink, StudentChecklistItem, Student)
+                select(DocumentChecklistLink, StudentChecklistItem, Student, Transcript, DocumentUpload)
                 .join(StudentChecklistItem, StudentChecklistItem.id == DocumentChecklistLink.checklist_item_id)
                 .join(Student, Student.id == DocumentChecklistLink.student_id)
+                .outerjoin(Transcript, Transcript.document_upload_id == DocumentChecklistLink.document_id)
+                .outerjoin(DocumentUpload, DocumentUpload.id == DocumentChecklistLink.document_id)
                 .where(
                     DocumentChecklistLink.tenant_id == tenant_id,
                     DocumentChecklistLink.match_status.in_(["needs_review", "unresolved"]),
                 )
                 .order_by(DocumentChecklistLink.linked_at.desc())
             ).all()
-            for link, checklist_item, student in link_rows:
+            for link, checklist_item, student, transcript, document in link_rows:
                 items.append(
                     DocumentExceptionItem(
                         id=str(link.id),
                         studentId=self._student_identifier(student),
                         studentName=self._student_name(student),
                         documentId=str(link.document_id),
+                        transcriptId=(str(transcript.id) if transcript else None),
                         issueType="checklist_linkage",
                         label=f"{checklist_item.label} requires review",
                         status=link.match_status,
                         createdAt=self._isoformat(link.linked_at),
+                        transcriptStatus=(transcript.status if transcript else None),
+                        documentStatus=(document.upload_status if document else None),
+                        parserConfidence=(self._to_float(transcript.parser_confidence, None) if transcript else None),
+                        reason=f"Checklist match is {link.match_status.replace('_', ' ')}.",
+                        suggestedAction="Open the exception details and confirm or reject the document match.",
                     )
                 )
 
             failure_rows = session.execute(
-                select(TranscriptProcessingFailure, Student)
+                select(TranscriptProcessingFailure, Student, Transcript, DocumentUpload)
                 .outerjoin(Transcript, Transcript.id == TranscriptProcessingFailure.transcript_id)
                 .outerjoin(Student, Student.id == Transcript.student_id)
+                .outerjoin(DocumentUpload, DocumentUpload.id == TranscriptProcessingFailure.document_upload_id)
                 .where(TranscriptProcessingFailure.tenant_id == tenant_id)
                 .order_by(TranscriptProcessingFailure.created_at.desc())
             ).all()
-            for failure, student in failure_rows:
+            latest_runs_by_transcript: dict[UUID, AgentRun] = {}
+            transcript_ids = [transcript.id for _failure, _student, transcript, _document in failure_rows if transcript is not None]
+            if transcript_ids:
+                run_rows = session.execute(
+                    select(AgentRun)
+                    .where(
+                        AgentRun.tenant_id == tenant_id,
+                        AgentRun.transcript_id.in_(transcript_ids),
+                    )
+                    .order_by(AgentRun.transcript_id.asc(), AgentRun.created_at.desc())
+                ).scalars().all()
+                for run in run_rows:
+                    if run.transcript_id is not None:
+                        latest_runs_by_transcript.setdefault(run.transcript_id, run)
+
+            for failure, student, transcript, document in failure_rows:
+                latest_run = latest_runs_by_transcript.get(transcript.id) if transcript is not None else None
                 items.append(
                     DocumentExceptionItem(
                         id=str(failure.id),
                         studentId=self._student_identifier(student) if student else None,
                         studentName=self._student_name(student) if student else failure.filename,
                         documentId=str(failure.document_upload_id) if failure.document_upload_id else None,
+                        transcriptId=(str(transcript.id) if transcript else None),
                         issueType="processing_failure",
                         label=failure.failure_message,
                         status=failure.failure_code,
                         createdAt=self._isoformat(failure.created_at),
+                        transcriptStatus=(transcript.status if transcript else None),
+                        documentStatus=(document.upload_status if document else None),
+                        parserConfidence=(self._to_float(transcript.parser_confidence, None) if transcript else None),
+                        reason=failure.failure_message,
+                        suggestedAction="Retry processing or open exception details to inspect the failed agent step.",
+                        latestRunStatus=(latest_run.status if latest_run is not None else None),
                     )
                 )
 
@@ -805,6 +854,32 @@ class AdmissionsOpsService:
             risk=self._title_case(student.risk_level or "low"),
             lastActivity=self._relative_time(student.latest_activity_at or student.updated_at),
             updatedAt=self._isoformat(student.latest_activity_at or student.updated_at),
+        )
+
+    def _build_projected_work_item(self, row: StudentWorkState) -> WorkItemResponse:
+        return WorkItemResponse(
+            id=f"work_{row.student_id.hex[:12]}",
+            studentId=row.student_identifier,
+            studentName=row.student_name,
+            population=row.population,
+            stage=row.stage,
+            completionPercent=row.completion_percent,
+            priority=row.priority,
+            priorityScore=row.priority_score,
+            section=row.section,
+            owner=WorkItemOwner(id=(str(row.owner_user_id) if row.owner_user_id else None), name=row.owner_name),
+            reasonToAct=WorkItemReason(code=row.reason_code, label=row.reason_label),
+            suggestedAction=WorkItemReason(code=row.suggested_action_code, label=row.suggested_action_label),
+            readiness=dict(row.readiness_json or {}),
+            blockingItems=[WorkBlockingItem(**entry) for entry in list(row.blocking_items_json or [])],
+            checklistSummary=WorkChecklistSummary(**dict(row.checklist_summary_json or {})),
+            fitScore=row.fit_score,
+            depositLikelihood=row.deposit_likelihood,
+            program=row.program,
+            institutionGoal=row.institution_goal,
+            risk=row.risk,
+            lastActivity=self._relative_time(row.last_activity_at),
+            updatedAt=self._isoformat(row.last_activity_at),
         )
 
     def _matches_work_filters(

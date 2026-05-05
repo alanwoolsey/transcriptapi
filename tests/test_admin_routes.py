@@ -362,3 +362,148 @@ def test_get_admin_scope_options_returns_values(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["territories"] == ["*", "midwest"]
+
+
+def test_reprocess_document_upload_returns_agent_run(monkeypatch):
+    from app.api import operations_routes
+
+    background_calls = []
+    storage_calls = []
+
+    monkeypatch.setattr(
+        operations_routes.operations_service,
+        "start_document_reprocess_upload",
+        lambda tenant_id, **kwargs: {
+            "success": True,
+            "status": "processing",
+            "detail": "Document queued for agent reprocessing.",
+            "documentId": kwargs["document_id"],
+            "documentUploadId": kwargs["document_id"],
+            "transcriptId": "tx-1",
+            "agentRunId": "run-1",
+        },
+    )
+
+    def fake_background(**kwargs):
+        background_calls.append(kwargs)
+
+    monkeypatch.setattr(operations_routes, "_run_document_reprocess_upload", fake_background)
+    monkeypatch.setattr(
+        operations_routes.document_storage,
+        "store_bytes",
+        lambda **kwargs: storage_calls.append(kwargs),
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.post(
+        f"/api/v1/documents/{uuid4()}/reprocess-upload",
+        files={"file": ("replacement.pdf", b"%PDF-1.4 replacement", "application/pdf")},
+        data={"document_type": "official_transcript", "use_bedrock": "false"},
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["agentRunId"] == "run-1"
+    assert payload["transcriptId"] == "tx-1"
+    assert len(background_calls) == 1
+    assert background_calls[0]["requested_document_type"] == "official_transcript"
+    assert background_calls[0]["use_bedrock"] is False
+    assert storage_calls[0]["storage_key"] == "tx-1/replacement.pdf"
+
+
+def test_reprocess_document_queues_stored_reprocess(monkeypatch):
+    from app.api import operations_routes
+
+    background_calls = []
+
+    monkeypatch.setattr(
+        operations_routes.operations_service,
+        "start_stored_document_reprocess",
+        lambda tenant_id, **kwargs: {
+            "success": True,
+            "status": "processing",
+            "detail": "Document queued for reprocessing.",
+            "documentId": kwargs["document_id"],
+            "documentUploadId": kwargs["document_id"],
+            "transcriptId": "tx-1",
+            "agentRunId": "run-2",
+        },
+    )
+
+    def fake_background(**kwargs):
+        background_calls.append(kwargs)
+
+    monkeypatch.setattr(operations_routes, "_run_stored_document_reprocess", fake_background)
+
+    client = TestClient(_build_test_app())
+    response = client.post(f"/api/v1/documents/{uuid4()}/reprocess")
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "processing"
+    assert response.json()["agentRunId"] == "run-2"
+    assert len(background_calls) == 1
+    assert background_calls[0]["agent_run_id"] == "run-2"
+
+
+def test_get_agent_run_status_returns_payload(monkeypatch):
+    from app.api import operations_routes
+
+    run_id = str(uuid4())
+    monkeypatch.setattr(
+        operations_routes.operations_service,
+        "get_agent_run_status",
+        lambda tenant_id, requested_run_id: {
+            "runId": requested_run_id,
+            "agentName": "document_agent",
+            "agentType": "document",
+            "status": "completed",
+            "triggerEvent": "manual_reprocess_upload",
+            "studentId": str(uuid4()),
+            "transcriptId": str(uuid4()),
+            "actorUserId": str(uuid4()),
+            "correlationId": "document-reprocess:test",
+            "error": None,
+            "startedAt": "2026-05-05T18:11:10Z",
+            "completedAt": "2026-05-05T18:11:18Z",
+        },
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.get(f"/api/v1/agent-runs/{run_id}")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+
+
+def test_get_agent_run_actions_returns_payload(monkeypatch):
+    from app.api import operations_routes
+
+    run_id = str(uuid4())
+    monkeypatch.setattr(
+        operations_routes.operations_service,
+        "get_agent_run_actions",
+        lambda tenant_id, requested_run_id: {
+            "runId": requested_run_id,
+            "items": [
+                {
+                    "actionId": str(uuid4()),
+                    "actionType": "parse_transcript",
+                    "toolName": "parse_transcript",
+                    "status": "completed",
+                    "studentId": str(uuid4()),
+                    "transcriptId": str(uuid4()),
+                    "error": None,
+                    "startedAt": "2026-05-05T18:11:10Z",
+                    "completedAt": "2026-05-05T18:11:15Z",
+                    "input": {"filename": "one.pdf"},
+                    "output": {"courses": 31},
+                }
+            ],
+        },
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.get(f"/api/v1/agent-runs/{run_id}/actions")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["actionType"] == "parse_transcript"

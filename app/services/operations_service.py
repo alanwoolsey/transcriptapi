@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timezone
 import secrets
 from uuid import UUID
@@ -7,6 +8,8 @@ from uuid import UUID
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.agents.base import AgentExecutionContext
+from app.agents.document_agent import DocumentAgent, DocumentAgentInput
 from app.db.models import (
     AUTHZ_SCHEMA,
     AppUser,
@@ -32,12 +35,14 @@ from app.db.models import (
     Program,
     Transcript,
     TranscriptDemographics,
+    TranscriptProcessingFailure,
     TranscriptParseRun,
     TranscriptStudentMatch,
     TrustFlag,
     WorkflowCase,
 )
 from app.db.session import get_session_factory
+from app.models.ops_models import DocumentExceptionSummaryAction, DocumentExceptionSummaryResponse, DocumentExceptionSummaryRun
 from app.models.operations_models import (
     ActionResponse,
     AdminChecklistTemplateItem,
@@ -54,7 +59,11 @@ from app.models.operations_models import (
     AdminUserItem,
     AdminUserReassignRequest,
     AdminUsersResponse,
+    AgentRunActionItemResponse,
+    AgentRunActionsResponse,
+    AgentRunStatusResponse,
     AdminUserUpdateRequest,
+    DocumentReprocessStartResponse,
     DocumentQueueItem,
     DocumentsQueueResponse,
     HandoffItem,
@@ -75,7 +84,11 @@ from app.models.operations_models import (
     YieldQueueResponse,
 )
 from app.services.admissions_ops_service import AdmissionsOpsService
+from app.services.agent_run_service import AgentRunService
 from app.services.auth_service import AuthService, CognitoAuthError
+from app.services.document_storage_service import DocumentStorageService
+from app.services.work_state_projector import WorkStateProjector
+from app.utils.storage_utils import build_document_storage_key
 from app.services.rbac_service import (
     MEMBERSHIP_ROLE_FALLBACKS,
     RBACService,
@@ -94,8 +107,12 @@ class OperationsService:
     def __init__(self, session_factory=None) -> None:
         self.session_factory = session_factory or get_session_factory
         self.admissions_ops = AdmissionsOpsService(session_factory=self.session_factory)
+        self.agent_run_service = AgentRunService(session_factory=self.session_factory)
         self.rbac_service = RBACService()
         self.auth_service = AuthService()
+        self.document_agent = DocumentAgent(agent_run_service=self.agent_run_service)
+        self.document_storage = DocumentStorageService()
+        self.work_state_projector = WorkStateProjector(session_factory=self.session_factory)
 
     def list_incomplete(
         self,
@@ -314,6 +331,7 @@ class OperationsService:
             student = self._resolve_student(session, tenant_id, student_id)
             if student is None:
                 return ActionResponse(success=False, status="not_found", detail="Student not found.")
+            previous_student_id = transcript.student_id
             session.execute(
                 select(TranscriptStudentMatch)
                 .where(TranscriptStudentMatch.tenant_id == tenant_id, TranscriptStudentMatch.transcript_id == transcript.id, TranscriptStudentMatch.is_current.is_(True))
@@ -340,6 +358,9 @@ class OperationsService:
                     is_current=True,
                 )
             )
+            if previous_student_id is not None and previous_student_id != student.id:
+                self.work_state_projector.refresh_student_projection(session, tenant_id=tenant_id, student_id=previous_student_id)
+            self.work_state_projector.refresh_student_projection(session, tenant_id=tenant_id, student_id=student.id)
             session.commit()
             return ActionResponse(status="confirmed", detail="Document matched to student.")
 
@@ -371,6 +392,8 @@ class OperationsService:
             transcript.student_id = None
             transcript.matched_at = datetime.now(timezone.utc)
             transcript.matched_by = "user"
+            if previous_student_id is not None:
+                self.work_state_projector.refresh_student_projection(session, tenant_id=tenant_id, student_id=previous_student_id)
             session.commit()
             return ActionResponse(status="rejected", detail="Document match rejected.")
 
@@ -378,12 +401,7 @@ class OperationsService:
         session_factory = self.session_factory()
         with session_factory() as session:
             document, transcript = self._resolve_document(session, tenant_id, document_id)
-            parse_run = session.execute(
-                select(TranscriptParseRun)
-                .where(TranscriptParseRun.tenant_id == tenant_id, TranscriptParseRun.transcript_id == transcript.id)
-                .order_by(TranscriptParseRun.started_at.desc())
-                .limit(1)
-            ).scalar_one_or_none()
+            parse_run = self._get_latest_parse_run(session, tenant_id, transcript.id)
             transcript.status = "processing"
             document.upload_status = "processing"
             if parse_run is not None:
@@ -391,8 +409,406 @@ class OperationsService:
                 parse_run.error_message = None
                 parse_run.completed_at = None
                 parse_run.started_at = datetime.now(timezone.utc)
+            self.work_state_projector.refresh_transcript_projection(session, tenant_id=tenant_id, student_id=transcript.student_id)
             session.commit()
             return ActionResponse(status="processing", detail="Document queued for reprocessing.")
+
+    def start_stored_document_reprocess(
+        self,
+        tenant_id: UUID,
+        *,
+        document_id: str,
+        actor_user_id: UUID | None,
+    ) -> DocumentReprocessStartResponse:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            with session.begin():
+                document, transcript = self._resolve_document(session, tenant_id, document_id)
+                parse_run = self._get_latest_parse_run(session, tenant_id, transcript.id)
+                resolved_use_bedrock = True
+                if parse_run is not None and isinstance(parse_run.request_json, dict):
+                    resolved_use_bedrock = bool(parse_run.request_json.get("use_bedrock", True))
+                now = datetime.now(timezone.utc)
+                transcript.status = "processing"
+                transcript.notes = None
+                document.upload_status = "processing"
+                document.updated_at = now
+                if parse_run is not None:
+                    parse_run.status = "processing"
+                    parse_run.error_message = None
+                    parse_run.completed_at = None
+                    parse_run.started_at = now
+                else:
+                    parse_run = TranscriptParseRun(
+                        tenant_id=tenant_id,
+                        transcript_id=transcript.id,
+                        parser_name="transcript_pipeline",
+                        parser_version="v1",
+                        request_json={
+                            "filename": document.original_filename,
+                            "content_type": document.mime_type,
+                            "requested_document_type": transcript.document_type,
+                            "use_bedrock": resolved_use_bedrock,
+                            "source": "stored_reprocess",
+                        },
+                        response_json=None,
+                        raw_text_excerpt=None,
+                        warnings_json=[],
+                        confidence_score=None,
+                        started_at=now,
+                        completed_at=None,
+                        status="processing",
+                        error_message=None,
+                    )
+                    session.add(parse_run)
+                    session.flush()
+                run = self.agent_run_service.create_run(
+                    session,
+                    tenant_id=tenant_id,
+                    student_id=transcript.student_id,
+                    transcript_id=transcript.id,
+                    actor_user_id=actor_user_id,
+                    correlation_id=f"document-reprocess:{document.id}",
+                    agent_name="document_agent",
+                    agent_type="document",
+                    trigger_event="stored_reprocess",
+                    status="queued",
+                    input_json={
+                        "document_id": str(document.id),
+                        "document_upload_id": str(document.id),
+                        "transcript_id": str(transcript.id),
+                        "filename": document.original_filename,
+                        "content_type": document.mime_type,
+                        "requested_document_type": transcript.document_type,
+                        "use_bedrock": resolved_use_bedrock,
+                        "storage_bucket": document.storage_bucket,
+                        "storage_key": document.storage_key,
+                    },
+                )
+                self.work_state_projector.refresh_transcript_projection(session, tenant_id=tenant_id, student_id=transcript.student_id)
+                return DocumentReprocessStartResponse(
+                    success=True,
+                    status="processing",
+                    detail="Document queued for reprocessing.",
+                    documentId=str(document.id),
+                    documentUploadId=str(document.id),
+                    transcriptId=str(transcript.id),
+                    agentRunId=str(run.id),
+                )
+
+    def start_document_reprocess_upload(
+        self,
+        tenant_id: UUID,
+        *,
+        document_id: str,
+        actor_user_id: UUID | None,
+        filename: str,
+        content_type: str | None,
+        file_size_bytes: int,
+        checksum_sha256: str,
+        requested_document_type: str,
+        use_bedrock: bool,
+    ) -> DocumentReprocessStartResponse:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            with session.begin():
+                document, transcript = self._resolve_document(session, tenant_id, document_id)
+                parse_run = self._get_latest_parse_run(session, tenant_id, transcript.id)
+                now = datetime.now(timezone.utc)
+                document.original_filename = filename
+                document.mime_type = content_type or document.mime_type
+                document.file_size_bytes = file_size_bytes
+                document.checksum_sha256 = checksum_sha256
+                document.storage_bucket = self.document_storage.default_bucket()
+                document.storage_key = build_document_storage_key(str(transcript.id), filename)
+                document.upload_status = "processing"
+                document.updated_at = now
+                transcript.status = "processing"
+                transcript.notes = None
+                if requested_document_type and requested_document_type != "auto":
+                    transcript.document_type = requested_document_type
+                if parse_run is not None:
+                    parse_run.status = "processing"
+                    parse_run.error_message = None
+                    parse_run.completed_at = None
+                    parse_run.started_at = now
+                    parse_run.request_json = {
+                        "filename": filename,
+                        "content_type": content_type,
+                        "requested_document_type": requested_document_type,
+                        "use_bedrock": use_bedrock,
+                        "source": "manual_reprocess_upload",
+                    }
+                    parse_run.response_json = None
+                    parse_run.raw_text_excerpt = None
+                    parse_run.warnings_json = []
+                    parse_run.confidence_score = None
+                else:
+                    parse_run = TranscriptParseRun(
+                        tenant_id=tenant_id,
+                        transcript_id=transcript.id,
+                        parser_name="transcript_pipeline",
+                        parser_version="v1",
+                        request_json={
+                            "filename": filename,
+                            "content_type": content_type,
+                            "requested_document_type": requested_document_type,
+                            "use_bedrock": use_bedrock,
+                            "source": "manual_reprocess_upload",
+                        },
+                        response_json=None,
+                        raw_text_excerpt=None,
+                        warnings_json=[],
+                        confidence_score=None,
+                        started_at=now,
+                        completed_at=None,
+                        status="processing",
+                        error_message=None,
+                    )
+                    session.add(parse_run)
+                    session.flush()
+
+                run = self.agent_run_service.create_run(
+                    session,
+                    tenant_id=tenant_id,
+                    student_id=transcript.student_id,
+                    transcript_id=transcript.id,
+                    actor_user_id=actor_user_id,
+                    correlation_id=f"document-reprocess:{document.id}",
+                    agent_name="document_agent",
+                    agent_type="document",
+                    trigger_event="manual_reprocess_upload",
+                    status="queued",
+                    input_json={
+                        "document_id": str(document.id),
+                        "document_upload_id": str(document.id),
+                        "transcript_id": str(transcript.id),
+                        "filename": filename,
+                        "content_type": content_type,
+                        "requested_document_type": requested_document_type,
+                        "use_bedrock": use_bedrock,
+                    },
+                )
+                self.work_state_projector.refresh_transcript_projection(session, tenant_id=tenant_id, student_id=transcript.student_id)
+                return DocumentReprocessStartResponse(
+                    success=True,
+                    status="processing",
+                    detail="Document queued for agent reprocessing.",
+                    documentId=str(document.id),
+                    documentUploadId=str(document.id),
+                    transcriptId=str(transcript.id),
+                    agentRunId=str(run.id),
+                )
+
+    def run_document_reprocess_upload(
+        self,
+        tenant_id: UUID,
+        *,
+        document_id: str,
+        actor_user_id: UUID | None,
+        filename: str,
+        content_type: str | None,
+        requested_document_type: str,
+        use_bedrock: bool,
+        content: bytes,
+        agent_run_id: str,
+    ) -> None:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            document, transcript = self._resolve_document(session, tenant_id, document_id)
+            context = AgentExecutionContext(
+                tenant_id=tenant_id,
+                student_id=transcript.student_id,
+                transcript_id=transcript.id,
+                actor_user_id=actor_user_id,
+                correlation_id=f"document-reprocess:{document.id}",
+                metadata={"document_id": str(document.id)},
+            )
+            payload = DocumentAgentInput(
+                filename=filename,
+                content_type=content_type or document.mime_type,
+                requested_document_type=requested_document_type or transcript.document_type,
+                use_bedrock=use_bedrock,
+                transcript_id=str(transcript.id),
+            )
+        self.document_agent.reprocess_content(
+            context=context,
+            payload=payload,
+            content=content,
+            existing_run_id=UUID(agent_run_id),
+        )
+
+    def run_stored_document_reprocess(
+        self,
+        tenant_id: UUID,
+        *,
+        document_id: str,
+        actor_user_id: UUID | None,
+        agent_run_id: str,
+    ) -> None:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            document, transcript = self._resolve_document(session, tenant_id, document_id)
+            parse_run = self._get_latest_parse_run(session, tenant_id, transcript.id)
+            content = self.document_storage.read_bytes(
+                storage_bucket=document.storage_bucket,
+                storage_key=document.storage_key,
+            )
+            resolved_use_bedrock = True
+            if parse_run is not None and isinstance(parse_run.request_json, dict):
+                resolved_use_bedrock = bool(parse_run.request_json.get("use_bedrock", True))
+            context = AgentExecutionContext(
+                tenant_id=tenant_id,
+                student_id=transcript.student_id,
+                transcript_id=transcript.id,
+                actor_user_id=actor_user_id,
+                correlation_id=f"document-reprocess:{document.id}",
+                metadata={"document_id": str(document.id)},
+            )
+            payload = DocumentAgentInput(
+                filename=document.original_filename,
+                content_type=document.mime_type,
+                requested_document_type=transcript.document_type,
+                use_bedrock=resolved_use_bedrock,
+                transcript_id=str(transcript.id),
+            )
+        self.document_agent.reprocess_content(
+            context=context,
+            payload=payload,
+            content=content,
+            existing_run_id=UUID(agent_run_id),
+        )
+
+    def get_agent_run_status(self, tenant_id: UUID, run_id: str) -> AgentRunStatusResponse | None:
+        try:
+            resolved_run_id = UUID(run_id)
+        except ValueError:
+            return None
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            run = self.agent_run_service.get_run(session, tenant_id=tenant_id, run_id=resolved_run_id)
+            if run is None:
+                return None
+            return AgentRunStatusResponse(
+                runId=str(run.id),
+                agentName=run.agent_name,
+                agentType=run.agent_type,
+                status=run.status,
+                triggerEvent=run.trigger_event,
+                studentId=str(run.student_id) if run.student_id else None,
+                transcriptId=str(run.transcript_id) if run.transcript_id else None,
+                actorUserId=str(run.actor_user_id) if run.actor_user_id else None,
+                correlationId=run.correlation_id,
+                error=run.error_message,
+                startedAt=self._iso(run.started_at),
+                completedAt=self._iso(run.completed_at),
+            )
+
+    def get_agent_run_actions(self, tenant_id: UUID, run_id: str) -> AgentRunActionsResponse | None:
+        try:
+            resolved_run_id = UUID(run_id)
+        except ValueError:
+            return None
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            run = self.agent_run_service.get_run(session, tenant_id=tenant_id, run_id=resolved_run_id)
+            if run is None:
+                return None
+            actions = self.agent_run_service.list_actions(session, tenant_id=tenant_id, run_id=resolved_run_id)
+            return AgentRunActionsResponse(
+                runId=str(run.id),
+                items=[
+                    AgentRunActionItemResponse(
+                        actionId=str(action.id),
+                        actionType=action.action_type,
+                        toolName=action.tool_name,
+                        status=action.status,
+                        studentId=str(action.student_id) if action.student_id else None,
+                        transcriptId=str(action.transcript_id) if action.transcript_id else None,
+                        error=action.error_message,
+                        startedAt=self._iso(action.started_at),
+                        completedAt=self._iso(action.completed_at),
+                        input=action.input_json or {},
+                        output=action.output_json or {},
+                    )
+                    for action in actions
+                ],
+            )
+
+    def get_document_exception_summary(self, tenant_id: UUID, document_id: str) -> DocumentExceptionSummaryResponse | None:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            try:
+                document, transcript = self._resolve_document(session, tenant_id, document_id)
+            except Exception:
+                return None
+            student = session.get(Student, transcript.student_id) if transcript.student_id else None
+            latest_run = self.agent_run_service.get_latest_run_for_transcript(
+                session,
+                tenant_id=tenant_id,
+                transcript_id=transcript.id,
+            )
+            actions = []
+            if latest_run is not None:
+                actions = self.agent_run_service.list_actions(session, tenant_id=tenant_id, run_id=latest_run.id)[-5:]
+            latest_failure = session.execute(
+                select(TranscriptProcessingFailure)
+                .where(
+                    TranscriptProcessingFailure.tenant_id == tenant_id,
+                    TranscriptProcessingFailure.document_upload_id == document.id,
+                )
+                .order_by(TranscriptProcessingFailure.created_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            issue_type = "processing_failure" if latest_failure is not None else "agent_run"
+            issue_label = latest_failure.failure_message if latest_failure is not None else (latest_run.error_message if latest_run and latest_run.error_message else "Document requires review")
+            issue_status = latest_failure.failure_code if latest_failure is not None else (latest_run.status if latest_run is not None else transcript.status)
+            suggested_action = "Retry document processing with the same file." if latest_failure is not None else "Review the latest agent run details."
+            updated_at = transcript.updated_at or document.updated_at
+            return DocumentExceptionSummaryResponse(
+                documentId=str(document.id),
+                transcriptId=str(transcript.id),
+                studentId=self._student_identifier(student) if student else None,
+                studentName=self._student_name(student) if student else None,
+                documentStatus=document.upload_status,
+                transcriptStatus=transcript.status,
+                parserConfidence=self._to_float(transcript.parser_confidence, None),
+                issueType=issue_type,
+                issueLabel=issue_label,
+                issueStatus=issue_status or "unknown",
+                suggestedAction=suggested_action,
+                failureCode=latest_failure.failure_code if latest_failure is not None else None,
+                failureMessage=latest_failure.failure_message if latest_failure is not None else (latest_run.error_message if latest_run is not None else None),
+                createdAt=self._iso(document.created_at),
+                updatedAt=self._iso(updated_at),
+                latestRun=(
+                    DocumentExceptionSummaryRun(
+                        runId=str(latest_run.id),
+                        agentName=latest_run.agent_name,
+                        status=latest_run.status,
+                        triggerEvent=latest_run.trigger_event,
+                        error=latest_run.error_message,
+                        startedAt=self._iso(latest_run.started_at),
+                        completedAt=self._iso(latest_run.completed_at),
+                    )
+                    if latest_run is not None
+                    else None
+                ),
+                recentActions=[
+                    DocumentExceptionSummaryAction(
+                        actionId=str(action.id),
+                        actionType=action.action_type,
+                        toolName=action.tool_name,
+                        status=action.status,
+                        error=action.error_message,
+                        startedAt=self._iso(action.started_at),
+                        completedAt=self._iso(action.completed_at),
+                        input=action.input_json or {},
+                        output=action.output_json or {},
+                    )
+                    for action in actions
+                ],
+            )
 
     def index_document(self, tenant_id: UUID, document_id: str) -> ActionResponse:
         session_factory = self.session_factory()
@@ -423,6 +839,7 @@ class OperationsService:
                     resolution_notes=None,
                 )
             )
+            self.work_state_projector.refresh_transcript_projection(session, tenant_id=tenant_id, student_id=transcript.student_id)
             session.commit()
             return ActionResponse(status="quarantined", detail="Document quarantined.")
 
@@ -439,6 +856,7 @@ class OperationsService:
                 flag.resolved_by_user_id = actor_user_id
                 flag.resolved_at = datetime.now(timezone.utc)
                 flag.resolution_notes = "Released by reviewer."
+            self.work_state_projector.refresh_transcript_projection(session, tenant_id=tenant_id, student_id=transcript.student_id)
             session.commit()
             return ActionResponse(status="released", detail="Document released.")
 
@@ -1198,6 +1616,17 @@ class OperationsService:
             select(Transcript).where(Transcript.tenant_id == tenant_id, Transcript.document_upload_id == document.id).limit(1)
         ).scalar_one()
         return document, transcript
+
+    def _get_latest_parse_run(self, session: Session, tenant_id: UUID, transcript_id: UUID) -> TranscriptParseRun | None:
+        return session.execute(
+            select(TranscriptParseRun)
+            .where(
+                TranscriptParseRun.tenant_id == tenant_id,
+                TranscriptParseRun.transcript_id == transcript_id,
+            )
+            .order_by(TranscriptParseRun.started_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
 
     def _resolve_student(self, session: Session, tenant_id: UUID, student_id: str) -> Student | None:
         try:

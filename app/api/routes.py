@@ -15,8 +15,10 @@ from app.models.api_models import (
     TranscriptUploadBatchStatusResponse,
     TranscriptUploadStatusResponse,
 )
+from app.services.document_storage_service import DocumentStorageService
 from app.services.pipeline import TranscriptPipeline
 from app.services.persistence import TranscriptPersistenceService
+from app.utils.storage_utils import build_document_storage_key
 from app.utils.file_utils import extract_supported_files_from_zip, get_extension
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/transcripts", tags=["transcripts"])
 pipeline = TranscriptPipeline()
 persistence = TranscriptPersistenceService()
+document_storage = DocumentStorageService()
 
 
 @router.post("/uploads", response_model=StartTranscriptUploadResponse | StartTranscriptUploadBatchResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -60,6 +63,12 @@ async def start_transcript_upload(
                 uploaded_by_user_id=auth_context.user.id,
                 original_filename=filename,
             )
+            for item, (extracted_filename, extracted_content) in zip(upload_record["items"], extracted_files, strict=False):
+                document_storage.store_bytes(
+                    storage_key=build_document_storage_key(item["transcriptId"], extracted_filename),
+                    content=extracted_content,
+                    content_type=file.content_type,
+                )
             background_tasks.add_task(
                 _process_transcript_upload_batch,
                 batch_items=[
@@ -85,6 +94,11 @@ async def start_transcript_upload(
             use_bedrock=normalized_use_bedrock,
             tenant_id=tenant_id,
             uploaded_by_user_id=auth_context.user.id,
+        )
+        document_storage.store_bytes(
+            storage_key=build_document_storage_key(upload_record["transcriptId"], filename),
+            content=content,
+            content_type=file.content_type,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     aws_profile: str | None = None
     aws_shared_credentials_file: str | None = None
     aws_config_file: str | None = None
+    document_storage_backend: str = "local"
+    document_storage_dir: str = ".document_storage"
+    document_storage_bucket: str | None = None
+    strands_enabled: bool = False
+    strands_model_id: str = "us.amazon.nova-pro-v1:0"
+    strands_temperature: float = 0.2
+    strands_max_tokens: int = 4096
     cognito_user_pool_id: str | None = None
     cognito_app_client_id: str | None = None
     cognito_clock_skew_seconds: int = 60

@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+import hashlib
+from uuid import UUID
+
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile, status
 
 from app.api.dependencies import AuthenticatedTenantContext, get_current_tenant_context, require_permission
 from app.models.operations_models import (
@@ -16,7 +19,10 @@ from app.models.operations_models import (
     AdminUserItem,
     AdminUserReassignRequest,
     AdminUsersResponse,
+    AgentRunActionsResponse,
+    AgentRunStatusResponse,
     AdminUserUpdateRequest,
+    DocumentReprocessStartResponse,
     DocumentsQueueResponse,
     HandoffResponse,
     IncompleteQueueResponse,
@@ -27,16 +33,65 @@ from app.models.operations_models import (
     SensitivityTiersResponse,
     YieldQueueResponse,
 )
+from app.services.document_storage_service import DocumentStorageService
 from app.services.operations_service import OperationsService
+from app.utils.storage_utils import build_document_storage_key
 
 router = APIRouter(tags=["operations"])
 operations_service = OperationsService()
+document_storage = DocumentStorageService()
 
 
 def _normalize_action_response(response: ActionResponse | dict) -> ActionResponse:
     if isinstance(response, ActionResponse):
         return response
     return ActionResponse(**response)
+
+
+def _normalize_reprocess_response(response: DocumentReprocessStartResponse | dict) -> DocumentReprocessStartResponse:
+    if isinstance(response, DocumentReprocessStartResponse):
+        return response
+    return DocumentReprocessStartResponse(**response)
+
+
+def _run_document_reprocess_upload(
+    *,
+    tenant_id: str,
+    document_id: str,
+    actor_user_id: str | None,
+    filename: str,
+    content_type: str | None,
+    requested_document_type: str,
+    use_bedrock: bool,
+    content: bytes,
+    agent_run_id: str,
+) -> None:
+    operations_service.run_document_reprocess_upload(
+        UUID(tenant_id),
+        document_id=document_id,
+        actor_user_id=UUID(actor_user_id) if actor_user_id else None,
+        filename=filename,
+        content_type=content_type,
+        requested_document_type=requested_document_type,
+        use_bedrock=use_bedrock,
+        content=content,
+        agent_run_id=agent_run_id,
+    )
+
+
+def _run_stored_document_reprocess(
+    *,
+    tenant_id: str,
+    document_id: str,
+    actor_user_id: str | None,
+    agent_run_id: str,
+) -> None:
+    operations_service.run_stored_document_reprocess(
+        UUID(tenant_id),
+        document_id=document_id,
+        actor_user_id=UUID(actor_user_id) if actor_user_id else None,
+        agent_run_id=agent_run_id,
+    )
 
 
 @router.get("/incomplete", response_model=IncompleteQueueResponse)
@@ -98,12 +153,100 @@ def reject_document_match(
     return operations_service.reject_document_match(auth_context.tenant.id, document_id=document_id, actor_user_id=auth_context.user.id)
 
 
-@router.post("/documents/{document_id}/reprocess", response_model=ActionResponse)
+@router.post("/documents/{document_id}/reprocess", response_model=DocumentReprocessStartResponse, status_code=status.HTTP_202_ACCEPTED)
 def reprocess_document(
+    background_tasks: BackgroundTasks,
     document_id: str,
     auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
-) -> ActionResponse:
-    return operations_service.reprocess_document(auth_context.tenant.id, document_id=document_id)
+) -> DocumentReprocessStartResponse:
+    response = _normalize_reprocess_response(
+        operations_service.start_stored_document_reprocess(
+            auth_context.tenant.id,
+            document_id=document_id,
+            actor_user_id=auth_context.user.id,
+        )
+    )
+    background_tasks.add_task(
+        _run_stored_document_reprocess,
+        tenant_id=str(auth_context.tenant.id),
+        document_id=document_id,
+        actor_user_id=str(auth_context.user.id),
+        agent_run_id=response.agentRunId,
+    )
+    return response
+
+
+@router.post(
+    "/documents/{document_id}/reprocess-upload",
+    response_model=DocumentReprocessStartResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def reprocess_document_upload(
+    background_tasks: BackgroundTasks,
+    document_id: str,
+    file: UploadFile = File(...),
+    document_type: str = Form("auto"),
+    use_bedrock: str | None = Form(None),
+    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+) -> DocumentReprocessStartResponse:
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    filename = file.filename or "upload.bin"
+    normalized_use_bedrock = str(use_bedrock or "").strip().lower() not in {"0", "false", "no", "off"}
+    response = _normalize_reprocess_response(
+        operations_service.start_document_reprocess_upload(
+            auth_context.tenant.id,
+            document_id=document_id,
+            actor_user_id=auth_context.user.id,
+            filename=filename,
+            content_type=file.content_type,
+            file_size_bytes=len(content),
+            checksum_sha256=hashlib.sha256(content).hexdigest(),
+            requested_document_type=document_type,
+            use_bedrock=normalized_use_bedrock,
+        )
+    )
+    document_storage.store_bytes(
+        storage_key=build_document_storage_key(response.transcriptId, filename),
+        content=content,
+        content_type=file.content_type,
+    )
+    background_tasks.add_task(
+        _run_document_reprocess_upload,
+        tenant_id=str(auth_context.tenant.id),
+        document_id=document_id,
+        actor_user_id=str(auth_context.user.id),
+        filename=filename,
+        content_type=file.content_type,
+        requested_document_type=document_type,
+        use_bedrock=normalized_use_bedrock,
+        content=content,
+        agent_run_id=response.agentRunId,
+    )
+    return response
+
+
+@router.get("/agent-runs/{run_id}", response_model=AgentRunStatusResponse)
+def get_agent_run_status(
+    run_id: str,
+    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+) -> AgentRunStatusResponse:
+    response = operations_service.get_agent_run_status(auth_context.tenant.id, run_id)
+    if response is None:
+        raise HTTPException(status_code=404, detail="Agent run not found.")
+    return response
+
+
+@router.get("/agent-runs/{run_id}/actions", response_model=AgentRunActionsResponse)
+def get_agent_run_actions(
+    run_id: str,
+    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+) -> AgentRunActionsResponse:
+    response = operations_service.get_agent_run_actions(auth_context.tenant.id, run_id)
+    if response is None:
+        raise HTTPException(status_code=404, detail="Agent run not found.")
+    return response
 
 
 @router.post("/documents/{document_id}/index", response_model=ActionResponse)

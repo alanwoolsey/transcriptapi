@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -27,12 +27,15 @@ from app.db.models import (
 from app.db.session import get_database_url, get_session_factory
 from app.models.api_models import ParseTranscriptResponse
 from app.services.student_resolution import StudentResolutionService
+from app.services.work_state_projector import WorkStateProjector
+from app.utils.storage_utils import build_document_storage_key, build_pending_storage_key, slugify_storage_filename
 
 
 class TranscriptPersistenceService:
     def __init__(self, session_factory=None):
         self.session_factory = session_factory or get_session_factory
         self.student_resolution = StudentResolutionService()
+        self.work_state_projector = WorkStateProjector(session_factory=self.session_factory)
 
     def is_enabled(self) -> bool:
         return bool(get_database_url())
@@ -64,7 +67,7 @@ class TranscriptPersistenceService:
                     mime_type=content_type or "application/octet-stream",
                     file_size_bytes=len(content),
                     storage_bucket="direct-upload",
-                    storage_key=f"pending/{self._slugify(filename)}",
+                    storage_key=build_pending_storage_key(filename),
                     checksum_sha256=checksum,
                     upload_status="processing",
                     uploaded_at=now,
@@ -94,7 +97,7 @@ class TranscriptPersistenceService:
                 session.add(transcript)
                 session.flush()
 
-                upload.storage_key = f"{transcript.id}/{self._slugify(filename)}"
+                upload.storage_key = build_document_storage_key(str(transcript.id), filename)
 
                 parse_run = TranscriptParseRun(
                     tenant_id=tenant.id,
@@ -231,7 +234,7 @@ class TranscriptPersistenceService:
                 institution = self._find_or_create_institution(session, tenant.id, parsed.demographic.institutionName)
                 now = datetime.now(timezone.utc)
                 checksum = hashlib.sha256(content).hexdigest()
-                storage_key = f"{parsed.documentId}/{self._slugify(filename)}"
+                storage_key = build_document_storage_key(parsed.documentId, filename)
 
                 upload = DocumentUpload(
                     tenant_id=tenant.id,
@@ -345,6 +348,11 @@ class TranscriptPersistenceService:
                     term_lookup=term_lookup,
                 )
                 self._persist_audit_events(session, tenant_id=tenant.id, transcript_id=transcript.id, parsed=parsed)
+                self.work_state_projector.refresh_transcript_projection(
+                    session,
+                    tenant_id=tenant.id,
+                    student_id=transcript.student_id,
+                )
 
             return {
                 "tenantId": str(tenant.id),
@@ -396,6 +404,8 @@ class TranscriptPersistenceService:
                 parse_run.completed_at = now
                 parse_run.status = "completed"
                 parse_run.error_message = None
+
+                self._clear_transcript_artifacts(session, tenant.id, transcript.id)
 
                 demographics = TranscriptDemographics(
                     tenant_id=tenant.id,
@@ -489,6 +499,11 @@ class TranscriptPersistenceService:
                         "document_type": transcript.document_type,
                         "parse_run_id": str(parse_run.id) if parse_run else None,
                     },
+                )
+                self.work_state_projector.refresh_transcript_projection(
+                    session,
+                    tenant_id=tenant.id,
+                    student_id=transcript.student_id,
                 )
 
     def get_transcript_status(self, transcript_id: str, tenant_id: str) -> dict[str, Any]:
@@ -683,6 +698,32 @@ class TranscriptPersistenceService:
         item.status = status
         item.error_message = error_message
 
+    def _clear_transcript_artifacts(self, session: Session, tenant_id: UUID, transcript_id: UUID) -> None:
+        session.execute(
+            delete(TranscriptCourse).where(
+                TranscriptCourse.tenant_id == tenant_id,
+                TranscriptCourse.transcript_id == transcript_id,
+            )
+        )
+        session.execute(
+            delete(TranscriptTerm).where(
+                TranscriptTerm.tenant_id == tenant_id,
+                TranscriptTerm.transcript_id == transcript_id,
+            )
+        )
+        session.execute(
+            delete(TranscriptGpaSummary).where(
+                TranscriptGpaSummary.tenant_id == tenant_id,
+                TranscriptGpaSummary.transcript_id == transcript_id,
+            )
+        )
+        session.execute(
+            delete(TranscriptDemographics).where(
+                TranscriptDemographics.tenant_id == tenant_id,
+                TranscriptDemographics.transcript_id == transcript_id,
+            )
+        )
+
     def _create_processing_upload_in_session(
         self,
         session: Session,
@@ -704,7 +745,7 @@ class TranscriptPersistenceService:
             mime_type=content_type or "application/octet-stream",
             file_size_bytes=len(content),
             storage_bucket="direct-upload",
-            storage_key=f"pending/{self._slugify(filename)}",
+            storage_key=build_pending_storage_key(filename),
             checksum_sha256=checksum,
             upload_status="processing",
             uploaded_at=now,
@@ -734,7 +775,7 @@ class TranscriptPersistenceService:
         session.add(transcript)
         session.flush()
 
-        upload.storage_key = f"{transcript.id}/{self._slugify(filename)}"
+        upload.storage_key = build_document_storage_key(str(transcript.id), filename)
 
         parse_run = TranscriptParseRun(
             tenant_id=tenant.id,
@@ -1003,4 +1044,4 @@ class TranscriptPersistenceService:
         return str(value or "").strip().lower() in {"1", "true", "yes", "y", "repeat", "repl", "r"}
 
     def _slugify(self, value: str) -> str:
-        return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-") or "upload.bin"
+        return slugify_storage_filename(value)

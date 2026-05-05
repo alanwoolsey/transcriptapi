@@ -103,6 +103,23 @@ class WorkItemsResponse(BaseModel):
     total: int
 
 
+class WorkProjectionStatusResponse(BaseModel):
+    projectedStudents: int
+    totalStudents: int
+    ready: bool
+    lastProjectedAt: str | None = None
+    remainingStudents: int = 0
+    nextCursor: str | None = None
+
+
+class WorkProjectionRebuildResponse(BaseModel):
+    status: str
+    detail: str
+    processedStudents: int = 0
+    nextCursor: str | None = None
+    remainingStudents: int = 0
+
+
 class LinkChecklistItemRequest(BaseModel):
     studentId: str
     checklistItemId: str
@@ -115,12 +132,61 @@ class DocumentExceptionItem(BaseModel):
     studentId: str | None = None
     studentName: str
     documentId: str | None = None
+    transcriptId: str | None = None
     issueType: str
     label: str
     status: str
     createdAt: str
+    transcriptStatus: str | None = None
+    documentStatus: str | None = None
+    parserConfidence: float | None = None
+    reason: str | None = None
+    suggestedAction: str | None = None
+    latestRunStatus: str | None = None
 
 
 class DocumentExceptionsResponse(BaseModel):
     items: list[DocumentExceptionItem] = Field(default_factory=list)
     total: int
+
+
+class DocumentExceptionSummaryRun(BaseModel):
+    runId: str
+    agentName: str
+    status: str
+    triggerEvent: str | None = None
+    error: str | None = None
+    startedAt: str | None = None
+    completedAt: str | None = None
+
+
+class DocumentExceptionSummaryAction(BaseModel):
+    actionId: str
+    actionType: str
+    toolName: str | None = None
+    status: str
+    error: str | None = None
+    startedAt: str | None = None
+    completedAt: str | None = None
+    input: dict = Field(default_factory=dict)
+    output: dict = Field(default_factory=dict)
+
+
+class DocumentExceptionSummaryResponse(BaseModel):
+    documentId: str
+    transcriptId: str | None = None
+    studentId: str | None = None
+    studentName: str | None = None
+    documentStatus: str | None = None
+    transcriptStatus: str | None = None
+    parserConfidence: float | None = None
+    issueType: str
+    issueLabel: str
+    issueStatus: str
+    suggestedAction: str
+    failureCode: str | None = None
+    failureMessage: str | None = None
+    createdAt: str | None = None
+    updatedAt: str | None = None
+    latestRun: DocumentExceptionSummaryRun | None = None
+    recentActions: list[DocumentExceptionSummaryAction] = Field(default_factory=list)

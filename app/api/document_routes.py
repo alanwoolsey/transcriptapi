@@ -3,11 +3,13 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import AuthenticatedTenantContext, get_current_tenant_context
 from app.db import get_db
-from app.models.ops_models import ChecklistItemResponse, DocumentExceptionsResponse, LinkChecklistItemRequest
+from app.models.ops_models import ChecklistItemResponse, DocumentExceptionSummaryResponse, DocumentExceptionsResponse, LinkChecklistItemRequest
 from app.services.admissions_ops_service import AdmissionsOpsNotFoundError, AdmissionsOpsService, AdmissionsOpsValidationError
+from app.services.operations_service import OperationsService
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 admissions_ops_service = AdmissionsOpsService()
+operations_service = OperationsService()
 
 
 @router.post("/{document_id}/link-checklist-item", response_model=list[ChecklistItemResponse])
@@ -36,3 +38,14 @@ def get_document_exceptions(
     auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
 ) -> DocumentExceptionsResponse:
     return admissions_ops_service.get_document_exceptions(auth_context.tenant.id)
+
+
+@router.get("/{document_id}/exception-summary", response_model=DocumentExceptionSummaryResponse)
+def get_document_exception_summary(
+    document_id: str,
+    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+) -> DocumentExceptionSummaryResponse:
+    response = operations_service.get_document_exception_summary(auth_context.tenant.id, document_id)
+    if response is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return response

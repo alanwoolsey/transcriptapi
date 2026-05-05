@@ -177,6 +177,12 @@ def test_start_transcript_upload_returns_processing_ids(monkeypatch):
         background_calls.append(kwargs)
 
     monkeypatch.setattr(routes, "_process_transcript_upload", fake_background)
+    storage_calls = []
+    monkeypatch.setattr(
+        routes.document_storage,
+        "store_bytes",
+        lambda **kwargs: storage_calls.append(kwargs),
+    )
 
     client = TestClient(_build_test_app())
     response = client.post(
@@ -193,6 +199,7 @@ def test_start_transcript_upload_returns_processing_ids(monkeypatch):
         "status": "processing",
     }
     assert background_calls
+    assert storage_calls[0]["storage_key"] == "tx-1/one.pdf"
 
 
 def test_start_transcript_upload_accepts_zip_and_returns_batch(monkeypatch):
@@ -232,6 +239,12 @@ def test_start_transcript_upload_accepts_zip_and_returns_batch(monkeypatch):
         background_calls.append(kwargs)
 
     monkeypatch.setattr(routes, "_process_transcript_upload_batch", fake_background)
+    storage_calls = []
+    monkeypatch.setattr(
+        routes.document_storage,
+        "store_bytes",
+        lambda **kwargs: storage_calls.append(kwargs),
+    )
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as archive:
@@ -252,6 +265,8 @@ def test_start_transcript_upload_accepts_zip_and_returns_batch(monkeypatch):
     assert len(background_calls[0]["batch_items"]) == 2
     assert background_calls[0]["batch_items"][0]["transcript_id"] == "tx-1"
     assert background_calls[0]["batch_items"][1]["transcript_id"] == "tx-2"
+    assert storage_calls[0]["storage_key"] == "tx-1/one.pdf"
+    assert storage_calls[1]["storage_key"] == "tx-2/two.txt"
 
 
 def test_process_transcript_upload_batch_processes_all_items(monkeypatch):

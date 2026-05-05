@@ -79,6 +79,47 @@ class ActionResponse(BaseModel):
     detail: str | None = None
 
 
+class DocumentReprocessStartResponse(ActionResponse):
+    documentId: str
+    documentUploadId: str
+    transcriptId: str
+    agentRunId: str
+
+
+class AgentRunStatusResponse(BaseModel):
+    runId: str
+    agentName: str
+    agentType: str | None = None
+    status: str
+    triggerEvent: str | None = None
+    studentId: str | None = None
+    transcriptId: str | None = None
+    actorUserId: str | None = None
+    correlationId: str | None = None
+    error: str | None = None
+    startedAt: str | None = None
+    completedAt: str | None = None
+
+
+class AgentRunActionItemResponse(BaseModel):
+    actionId: str
+    actionType: str
+    toolName: str | None = None
+    status: str
+    studentId: str | None = None
+    transcriptId: str | None = None
+    error: str | None = None
+    startedAt: str | None = None
+    completedAt: str | None = None
+    input: dict = Field(default_factory=dict)
+    output: dict = Field(default_factory=dict)
+
+
+class AgentRunActionsResponse(BaseModel):
+    runId: str
+    items: list[AgentRunActionItemResponse] = Field(default_factory=list)
+
+
 class YieldQueueItem(BaseModel):
     studentId: str
     studentName: str
