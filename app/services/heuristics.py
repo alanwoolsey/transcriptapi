@@ -2171,6 +2171,14 @@ class TranscriptHeuristicParser:
             dob_match = re.search(r"\b(?:DOB|Date of Birth|Birth Date)[:\-]?\s*([0-9Xx/\-]{6,12})\b", line, re.IGNORECASE)
             if dob_match and not student["date_of_birth"]:
                 student["date_of_birth"] = dob_match.group(1)
+        if not student["student_id"]:
+            student["student_id"] = self._extract_after_prefix(text_lines, "Student ID")
+        if not student["date_of_birth"]:
+            student["date_of_birth"] = self._extract_after_prefix(text_lines, "Date of Birth")
+        if not student["student_id"]:
+            student["student_id"] = self._line_after(text_lines, "Student ID")
+        if not student["date_of_birth"]:
+            student["date_of_birth"] = self._line_after(text_lines, "Date of Birth")
         if not student["name"]:
             student["name"] = self._extract_labeled_name_value(text_lines, "Student Name")
         if not student["name"] and text_lines:
@@ -2260,24 +2268,39 @@ class TranscriptHeuristicParser:
     def _parse_terms_and_courses(self, text_lines: List[str]) -> List[Dict[str, Any]]:
         current_term = "Unassigned"
         bucket: dict[str, list[TranscriptCourse]] = defaultdict(list)
+        idx = 0
 
-        for line in text_lines:
+        while idx < len(text_lines):
+            line = text_lines[idx].strip()
             if TERM_PATTERN.search(line):
-                current_term = line.strip()
+                current_term = line
+                idx += 1
                 continue
             if self._looks_like_high_school_year_header(line):
-                current_term = line.strip()
+                current_term = line
+                idx += 1
                 continue
 
-            if line.strip().startswith("-") and bucket.get(current_term):
+            if line.startswith("-") and bucket.get(current_term):
                 previous = bucket[current_term][-1]
-                previous.course_title = f"{previous.course_title or ''} {line.strip().lstrip('-').strip()}".strip()
+                previous.course_title = f"{previous.course_title or ''} {line.lstrip('-').strip()}".strip()
+                idx += 1
                 continue
 
             parsed = self._parse_course_line(line)
             if parsed:
                 parsed.term = current_term
                 bucket[current_term].append(parsed)
+                idx += 1
+                continue
+
+            parsed, next_idx = self._consume_vertical_high_school_course(text_lines, idx, current_term)
+            if parsed:
+                bucket[current_term].append(parsed)
+                idx = next_idx
+                continue
+
+            idx += 1
 
         terms: List[Dict[str, Any]] = []
         for term_name, courses in bucket.items():
@@ -2300,6 +2323,98 @@ class TranscriptHeuristicParser:
                     }
                 )
         return terms
+
+    def _consume_vertical_high_school_course(
+        self,
+        text_lines: List[str],
+        start_idx: int,
+        current_term: str,
+    ) -> Tuple[TranscriptCourse | None, int]:
+        title = text_lines[start_idx].strip()
+        if not self._is_vertical_high_school_course_title(title):
+            return None, start_idx + 1
+
+        idx = start_idx + 1
+        while idx < len(text_lines) and not text_lines[idx].strip():
+            idx += 1
+        if idx >= len(text_lines):
+            return None, idx
+        credit_line = text_lines[idx].strip()
+
+        idx += 1
+        while idx < len(text_lines) and not text_lines[idx].strip():
+            idx += 1
+        if idx >= len(text_lines):
+            return None, idx
+        grade_line = text_lines[idx].strip()
+
+        credits = self._parse_vertical_course_credit(credit_line)
+        grade = self._parse_vertical_course_grade(grade_line)
+        if credits is None or grade is None:
+            return None, start_idx + 1
+
+        confidence_score, confidence_reasons = self._estimate_course_confidence(
+            course_code=None,
+            course_title=title,
+            credits=credits,
+            grade=grade,
+            term=current_term,
+        )
+        return (
+            TranscriptCourse(
+                course_code=None,
+                course_title=title,
+                credits=credits,
+                grade=grade,
+                term=current_term,
+                confidence_score=confidence_score,
+                confidence_reasons=confidence_reasons,
+            ),
+            idx + 1,
+        )
+
+    def _is_vertical_high_school_course_title(self, line: str) -> bool:
+        compact = re.sub(r"\s+", " ", (line or "").strip())
+        if not compact or len(compact) < 3:
+            return False
+        if self._should_skip_non_course_line(compact):
+            return False
+        if TERM_PATTERN.search(compact) or self._looks_like_high_school_year_header(compact):
+            return False
+        if compact.lower() in {
+            "course",
+            "credit",
+            "credits",
+            "final grade",
+            "term gpa:",
+            "progress credits",
+            "requirement area",
+            "status",
+            "earned",
+            "req.",
+        }:
+            return False
+        if self._parse_course_line(compact):
+            return False
+        if self._parse_vertical_course_credit(compact) is not None:
+            return False
+        if self._parse_vertical_course_grade(compact) is not None:
+            return False
+        if not re.search(r"[A-Za-z]{3,}", compact):
+            return False
+        return True
+
+    def _parse_vertical_course_credit(self, value: str) -> float | None:
+        compact = (value or "").strip()
+        if not re.fullmatch(r"\d+(?:\.\d+)?", compact):
+            return None
+        return float(compact)
+
+    def _parse_vertical_course_grade(self, value: str) -> str | None:
+        compact = re.sub(r"[^A-Za-z0-9+/-]", "", (value or "").strip()).upper()
+        if compact == "NA":
+            return "N/A"
+        return compact if looks_like_grade(compact) else None
 
     def _parse_course_line(self, line: str) -> TranscriptCourse | None:
         compact = re.sub(r"\s+", " ", line).strip()
@@ -2415,7 +2530,11 @@ class TranscriptHeuristicParser:
         )
 
     def _looks_like_high_school_year_header(self, line: str) -> bool:
-        return bool(re.match(r"^\d{2}-\d{2}\s+.+(?:High School|Junior High School|Digital Learning Alliance)\s*$", line.strip(), re.IGNORECASE))
+        compact = line.strip()
+        return bool(
+            re.match(r"^\d{2}-\d{2}\s+.+(?:High School|Junior High School|Digital Learning Alliance)\s*$", compact, re.IGNORECASE)
+            or re.match(r"^\d{4}-\d{4}\s+Grade\s+(?:9|10|11|12)\s*$", compact, re.IGNORECASE)
+        )
 
     def _should_skip_non_course_line(self, compact: str) -> bool:
         lowered = compact.lower()

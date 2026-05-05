@@ -384,6 +384,7 @@ class TranscriptPersistenceService:
                 transcript.fraud_flagged_at = self._parse_datetime(parsed.fraudFlaggedAt)
                 transcript.parser_confidence = self._to_decimal(parsed.metadata.get("parser_confidence"))
                 transcript.page_count = self._page_count(parsed)
+                transcript.notes = None
 
                 upload.upload_status = "completed"
                 self._update_batch_item_status(session, tenant.id, transcript.id, "completed", None)

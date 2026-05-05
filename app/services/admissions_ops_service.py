@@ -63,6 +63,7 @@ class _ChecklistContext:
     items: list[StudentChecklistItem]
     readiness: StudentDecisionReadiness
     priority: StudentPriorityScore
+    latest_transcript_confidence: float | None = None
 
 
 class AdmissionsOpsService:
@@ -213,13 +214,12 @@ class AdmissionsOpsService:
             raise AdmissionsOpsNotFoundError("Document not found.")
 
         now = datetime.now(timezone.utc)
-        link = db.execute(
-            select(DocumentChecklistLink).where(
-                DocumentChecklistLink.tenant_id == tenant_id,
-                DocumentChecklistLink.document_id == document.id,
-                DocumentChecklistLink.checklist_item_id == item.id,
-            )
-        ).scalar_one_or_none()
+        link = self._get_document_checklist_link(
+            db,
+            tenant_id=tenant_id,
+            document_id=document.id,
+            checklist_item_id=item.id,
+        )
         if link is None:
             link = DocumentChecklistLink(
                 tenant_id=tenant_id,
@@ -349,14 +349,16 @@ class AdmissionsOpsService:
         ).scalars().all()
         contexts: list[_ChecklistContext] = []
         for student in students:
-            contexts.append(self._ensure_student_state(session, tenant_id, str(student.id)))
+            contexts.append(self._ensure_student_state_for_student(session, tenant_id, student))
         return contexts
 
     def _ensure_student_state(self, session: Session, tenant_id: UUID, student_id: str) -> _ChecklistContext:
         student = self._resolve_student(session, tenant_id, student_id)
         if student is None:
             raise AdmissionsOpsNotFoundError("Student not found.")
+        return self._ensure_student_state_for_student(session, tenant_id, student)
 
+    def _ensure_student_state_for_student(self, session: Session, tenant_id: UUID, student: Student) -> _ChecklistContext:
         checklist = session.execute(
             select(StudentChecklist).where(StudentChecklist.tenant_id == tenant_id, StudentChecklist.student_id == student.id).limit(1)
         ).scalar_one_or_none()
@@ -501,13 +503,12 @@ class AdmissionsOpsService:
                 item.needs_review = False
                 item.completed_at = None
 
-            link = session.execute(
-                select(DocumentChecklistLink).where(
-                    DocumentChecklistLink.tenant_id == tenant_id,
-                    DocumentChecklistLink.document_id == latest_upload.id,
-                    DocumentChecklistLink.checklist_item_id == item.id,
-                )
-            ).scalar_one_or_none()
+            link = self._get_document_checklist_link(
+                session,
+                tenant_id=tenant_id,
+                document_id=latest_upload.id,
+                checklist_item_id=item.id,
+            )
             if link is None:
                 link = DocumentChecklistLink(
                     tenant_id=tenant_id,
@@ -521,6 +522,25 @@ class AdmissionsOpsService:
             link.match_status = match_status
             link.linked_at = now
             link.linked_by = "system"
+
+    def _get_document_checklist_link(
+        self,
+        session: Session,
+        *,
+        tenant_id: UUID,
+        document_id: UUID,
+        checklist_item_id: UUID,
+    ) -> DocumentChecklistLink | None:
+        return session.execute(
+            select(DocumentChecklistLink)
+            .where(
+                DocumentChecklistLink.tenant_id == tenant_id,
+                DocumentChecklistLink.document_id == document_id,
+                DocumentChecklistLink.checklist_item_id == checklist_item_id,
+            )
+            .order_by(DocumentChecklistLink.linked_at.desc(), DocumentChecklistLink.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
 
     def _recalculate_student_state(
         self,
@@ -587,10 +607,11 @@ class AdmissionsOpsService:
         if priority is None:
             priority = StudentPriorityScore(tenant_id=tenant_id, student_id=student.id)
             session.add(priority)
+        latest_confidence = self._latest_transcript_confidence(session, tenant_id, student.id)
         priority_band, priority_score, reason_code = self._priority_for_student(
             checklist=checklist,
             readiness=readiness,
-            fit_score=self._estimate_fit_score(student.latest_cumulative_gpa, student.accepted_credits, self._latest_transcript_confidence(session, tenant_id, student.id)),
+            fit_score=self._estimate_fit_score(student.latest_cumulative_gpa, student.accepted_credits, latest_confidence),
             has_recent_doc_review=self._has_recent_doc_review(items),
             trust_blocked=trust_blocked,
         )
@@ -601,7 +622,14 @@ class AdmissionsOpsService:
 
         self._replace_signals(session, tenant_id, student, checklist, items, readiness, priority)
         session.flush()
-        return _ChecklistContext(student=student, checklist=checklist, items=items, readiness=readiness, priority=priority)
+        return _ChecklistContext(
+            student=student,
+            checklist=checklist,
+            items=items,
+            readiness=readiness,
+            priority=priority,
+            latest_transcript_confidence=latest_confidence,
+        )
 
     def _replace_signals(
         self,
@@ -740,7 +768,9 @@ class AdmissionsOpsService:
         owner = self._load_owner(session, student.advisor_user_id)
         program_name = self._program_name(session, student)
         institution_goal = self._institution_goal(session, tenant_id, student)
-        latest_confidence = self._latest_transcript_confidence(session, tenant_id, student.id)
+        latest_confidence = context.latest_transcript_confidence
+        if latest_confidence is None:
+            latest_confidence = self._latest_transcript_confidence(session, tenant_id, student.id)
 
         return WorkItemResponse(
             id=f"work_{student.id.hex[:12]}",

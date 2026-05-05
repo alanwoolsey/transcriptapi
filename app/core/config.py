@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     aws_config_file: str | None = None
     cognito_user_pool_id: str | None = None
     cognito_app_client_id: str | None = None
+    cognito_clock_skew_seconds: int = 60
     use_textract: bool = True
     use_bedrock: bool = True
     bedrock_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"

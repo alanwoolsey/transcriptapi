@@ -443,6 +443,87 @@ def test_parser_handles_code_less_high_school_transcript_rows():
     assert courses[2]["grade"] == "P"
 
 
+def test_parser_handles_vertical_high_school_course_rows_with_four_digit_year_headers():
+    parser = TranscriptHeuristicParser()
+    text = """
+    SAMPLE ONLY - UNOFFICIAL HIGH SCHOOL TRANSCRIPT
+    North Valley High School
+    Student Name
+    Jordan Avery Bennett
+    Student ID
+    2026-18473
+    Date of Birth
+    2008-09-17
+    Cumulative GPA
+    3.74
+    Credits Attempted
+    25.50
+    Credits Earned
+    25.50
+    2022-2023 Grade 9
+    Course
+    Credit
+    Final Grade
+    English I Honors
+    1.00
+    A
+    Algebra I
+    1.00
+    A-
+    Biology
+    1.00
+    B+
+    World Geography
+    1.00
+    A
+    Spanish I
+    1.00
+    A-
+    Art Foundations
+    0.50
+    A
+    Physical Education I
+    0.50
+    A
+    Health
+    0.50
+    A-
+    Term GPA: 3.78
+    6.50
+    Credits
+    2023-2024 Grade 10
+    Course
+    Credit
+    Final Grade
+    English II Honors
+    1.00
+    A-
+    Geometry Honors
+    1.00
+    B+
+    Chemistry
+    1.00
+    A-
+    U.S. History
+    1.00
+    A
+    """.strip()
+
+    parsed = parser.parse(text, "high_school_transcript")
+
+    assert parsed["student"]["name"] == "Jordan Avery Bennett"
+    assert parsed["student"]["student_id"] == "2026-18473"
+    assert parsed["academic_summary"]["gpa"] == 3.74
+    assert len(parsed["terms"]) == 2
+    courses = [course for term in parsed["terms"] for course in term["courses"]]
+    assert len(courses) == 12
+    by_title = {course["course_title"]: course for course in courses}
+    assert by_title["English I Honors"]["term"] == "2022-2023 Grade 9"
+    assert by_title["English I Honors"]["grade"] == "A"
+    assert by_title["Art Foundations"]["credits"] == 0.5
+    assert by_title["Geometry Honors"]["grade"] == "B+"
+
+
 def test_parser_handles_formatted_xml_transcript_rows():
     parser = TranscriptHeuristicParser()
     text = """

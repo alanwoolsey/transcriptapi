@@ -811,6 +811,13 @@ class DocumentChecklistLink(Base):
 
 Index("ix_document_checklist_links_tenant_student", DocumentChecklistLink.tenant_id, DocumentChecklistLink.student_id)
 Index("ix_document_checklist_links_tenant_document", DocumentChecklistLink.tenant_id, DocumentChecklistLink.document_id)
+Index(
+    "uq_document_checklist_links_tenant_document_item",
+    DocumentChecklistLink.tenant_id,
+    DocumentChecklistLink.document_id,
+    DocumentChecklistLink.checklist_item_id,
+    unique=True,
+)
 
 
 class DuplicateCandidate(Base):

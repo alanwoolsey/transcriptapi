@@ -32,6 +32,7 @@ class CognitoAccessTokenVerifier:
                 signing_key.key,
                 algorithms=["RS256"],
                 issuer=self.issuer,
+                leeway=settings.cognito_clock_skew_seconds,
                 options={"require": ["exp", "iat", "iss", "token_use"]},
             )
         except Exception as exc:
