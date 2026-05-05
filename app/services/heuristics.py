@@ -89,6 +89,8 @@ class TranscriptHeuristicParser:
             return self._parse_logan_district_transcript(text, document_type)
         if self._looks_like_parchment_high_school_transcript(text):
             return self._parse_parchment_high_school_transcript(text, document_type)
+        if self._looks_like_student_achievement_summary_transcript(text):
+            return self._parse_student_achievement_summary_transcript(text, document_type)
         if self._looks_like_school_report_transcript(text):
             return self._parse_school_report_transcript(text, document_type)
 
@@ -122,6 +124,15 @@ class TranscriptHeuristicParser:
     def _looks_like_school_report_transcript(self, text: str) -> bool:
         lowered = text.lower()
         return lowered.startswith("ricks, carter") or ("school report" in lowered and "grade 9 -" in lowered and "t1 t2 t3 t4" in lowered)
+
+    def _looks_like_student_achievement_summary_transcript(self, text: str) -> bool:
+        lowered = re.sub(r"\s+", " ", text.lower())
+        return (
+            "student achievement summary" in lowered
+            and "student name" in lowered
+            and "course title s1 s2 credits" in lowered
+            and ("9th grade 10th grade" in lowered or "11th grade 12th grade" in lowered)
+        )
 
     def _looks_like_brandon_valley_transcript(self, text: str) -> bool:
         lowered = re.sub(r"\s+", " ", text.lower())
@@ -905,6 +916,184 @@ class TranscriptHeuristicParser:
             "course_confidence_summary": course_summary,
         }
 
+    def _parse_student_achievement_summary_transcript(self, text: str, document_type: str) -> Dict[str, Any]:
+        text_lines = lines(text)
+        institution_name = self._extract_student_achievement_summary_institution(text)
+        student = {
+            "name": self._extract_labeled_name_value(text_lines, "Student Name")
+            or self._extract_school_report_wrapper_name(text_lines)
+            or self._extract_top_name(text_lines),
+            "student_id": None,
+            "date_of_birth": self._extract_student_achievement_summary_dob(text),
+            "address": {"street": None, "city": None, "state": None, "postal_code": None},
+        }
+        summary = self._parse_student_achievement_summary_metrics(text)
+        terms = self._parse_student_achievement_summary_courses(text_lines, institution_name)
+        terms = self.ensure_course_confidences(terms)
+        course_summary = self.summarize_course_confidence(terms)
+        confidence = self._estimate_confidence(student, [{"name": institution_name, "type": "high_school"}] if institution_name else [], summary, terms, course_summary)
+        return {
+            "document_type": "high_school_transcript" if document_type == "unknown" else document_type,
+            "student": student,
+            "institutions": [{"name": institution_name, "type": "high_school"}] if institution_name else [],
+            "academic_summary": summary,
+            "terms": terms,
+            "parser_confidence": max(confidence, 0.87 if terms else 0.65),
+            "course_confidence_summary": course_summary,
+        }
+
+    def _extract_student_achievement_summary_institution(self, text: str) -> str:
+        match = re.search(r"(20\d{2}-20\d{2})\s+([A-Za-z][A-Za-z .&'-]*High School)", text)
+        if match:
+            return re.sub(r"\s+", " ", match.group(2)).strip()
+        match = re.search(r"\b([A-Za-z][A-Za-z .&'-]*High School)\b", text)
+        return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
+
+    def _extract_student_achievement_summary_dob(self, text: str) -> str | None:
+        match = re.search(r"Date of Birth(?:\s+Current Grade\s+Gender)?\s+([0-9]{2}/[0-9]{2}/[0-9]{4})", text, re.IGNORECASE)
+        return match.group(1) if match else None
+
+    def _parse_student_achievement_summary_metrics(self, text: str) -> Dict[str, Any]:
+        match = re.search(
+            r"Rank\s+Out of Graduation Date\s+([0-9]+(?:\.[0-9]+)?)\s+([0-9]+(?:\.[0-9]+)?)\s+(\d+)\s+(\d+)",
+            text,
+            re.IGNORECASE,
+        )
+        return {
+            "gpa": float(match.group(1)) if match else None,
+            "total_credits_attempted": None,
+            "total_credits_earned": None,
+            "class_rank": f"{match.group(3)}/{match.group(4)}" if match else None,
+        }
+
+    def _parse_student_achievement_summary_courses(self, text_lines: List[str], institution_name: str) -> List[Dict[str, Any]]:
+        courses_by_term: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        current_terms: List[str] = []
+        in_course_section = False
+
+        for idx, raw_line in enumerate(text_lines):
+            line = re.sub(r"\s+", " ", raw_line.strip())
+            if not line:
+                continue
+            if re.match(r"^(9th|10th|11th|12th) Grade\s+(9th|10th|11th|12th) Grade\b", line):
+                current_terms = self._student_achievement_summary_term_names(line, text_lines[idx + 1] if idx + 1 < len(text_lines) else "", institution_name)
+                in_course_section = False
+                continue
+            if not current_terms:
+                continue
+            if "Course Title S1 S2 Credits" in line:
+                in_course_section = True
+                continue
+            if not in_course_section:
+                continue
+            if self._is_student_achievement_summary_stop_line(line):
+                in_course_section = False
+                continue
+
+            row_courses = self._parse_student_achievement_summary_row(line, current_terms)
+            if not row_courses:
+                continue
+            for course in row_courses:
+                term_name = course.pop("_term_name")
+                self.ensure_course_confidences([{"term_name": term_name, "courses": [course]}])
+                courses_by_term[term_name].append(course)
+
+        return [{"term_name": term_name, "courses": courses} for term_name, courses in courses_by_term.items() if courses]
+
+    def _student_achievement_summary_term_names(self, grade_line: str, year_line: str, institution_name: str) -> List[str]:
+        years = re.findall(r"20\d{2}-20\d{2}", year_line)
+        institution_matches = re.findall(r"(20\d{2}-20\d{2})\s+([A-Za-z][A-Za-z .&'-]*High School)", year_line)
+        institutions_by_year = {year: inst.strip() for year, inst in institution_matches}
+        grade_labels = re.findall(r"(9th|10th|11th|12th) Grade", grade_line)
+        terms: List[str] = []
+        for idx, grade in enumerate(grade_labels):
+            year = years[idx] if idx < len(years) else ""
+            inst = institutions_by_year.get(year) or institution_name
+            label = f"{grade} Grade"
+            if year and inst:
+                terms.append(f"{label} {year} {inst}".strip())
+            elif year:
+                terms.append(f"{label} {year}".strip())
+            else:
+                terms.append(label)
+        return terms
+
+    def _is_student_achievement_summary_stop_line(self, line: str) -> bool:
+        lowered = line.lower()
+        return lowered.startswith(
+            (
+                "annual gpa",
+                "graduation requirements",
+                "number of credits earned by department",
+                "specialized honors courses",
+                "signature / title",
+            )
+        )
+
+    def _parse_student_achievement_summary_row(self, line: str, current_terms: List[str]) -> List[Dict[str, Any]]:
+        if "=" in line or "grades:" in line.lower():
+            line = re.split(r"\b(?:Un-weighted grades:|Weighted grades:|A =|C =|F =|S =|T =)", line, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        if not line:
+            return []
+
+        remaining = line
+        courses: List[Dict[str, Any]] = []
+        for column_index in range(min(2, len(current_terms))):
+            parsed = self._consume_student_achievement_summary_entry(remaining)
+            if parsed is None:
+                break
+            course, remaining = parsed
+            course["_term_name"] = current_terms[column_index]
+            course["source_line"] = line
+            course["source_term_line"] = current_terms[column_index]
+            courses.append(course)
+            if not remaining:
+                break
+        return courses
+
+    def _consume_student_achievement_summary_entry(self, text: str) -> Tuple[Dict[str, Any], str] | None:
+        compact = re.sub(r"\s+", " ", text.strip())
+        if not compact:
+            return None
+        grade_pattern = r"A\+?|A-|B\+?|B-|C\+?|C-|D\+?|D-|F|P|W|WF|I"
+        patterns = [
+            re.compile(
+                rf"^(?P<title>.+?)\s+(?:(?P<rigor>AP|H|S)\s+)?(?P<grade1>{grade_pattern})(?:\s+(?P<grade2>{grade_pattern}))?\s+(?P<credit>\d+\.\d+)(?:\s+(?P<rest>.*))?$",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r"^(?P<title>.+?)\s+(?:(?P<rigor>AP|H|S)\s+)?(?P<credit>\d+\.\d+)(?:\s+(?P<rest>.*))?$",
+                re.IGNORECASE,
+            ),
+        ]
+        for pattern in patterns:
+            match = pattern.match(compact)
+            if not match:
+                continue
+            title = match.group("title").strip(" -")
+            if not title or self._is_student_achievement_summary_noise_title(title):
+                continue
+            credits = float(match.group("credit"))
+            grade = (match.groupdict().get("grade2") or match.groupdict().get("grade1") or "").upper() or None
+            course = {
+                "course_code": None,
+                "course_title": title,
+                "credits": credits,
+                "grade": grade,
+                "term": None,
+            }
+            rest = re.sub(r"\s+", " ", (match.groupdict().get("rest") or "").strip())
+            return course, rest
+        return None
+
+    def _is_student_achievement_summary_noise_title(self, title: str) -> bool:
+        lowered = title.lower()
+        if lowered in {"course title", "current grade gender", "date of birth", "student name"}:
+            return True
+        if any(token in lowered for token in ("gpa", "credits", "graduation requirements", "specialized honors")):
+            return True
+        return False
+
     def _parse_parchment_high_school_transcript(self, text: str, document_type: str) -> Dict[str, Any]:
         text_lines = lines(text)
         institution_name = self._parchment_high_school_institution(text_lines)
@@ -1366,6 +1555,51 @@ class TranscriptHeuristicParser:
         if text_lines and "," in text_lines[0]:
             return self._normalize_name_value(text_lines[0].strip())
         return None
+
+    def _extract_labeled_name_value(self, text_lines: List[str], label: str) -> str | None:
+        normalized_label = self._normalize_logan_text(label).rstrip(":").lower()
+        for idx, line in enumerate(text_lines):
+            compact = self._normalize_logan_text(line)
+            if compact.rstrip(":").lower() != normalized_label:
+                continue
+            fallback_candidate = None
+            for lookahead in range(idx + 1, min(idx + 6, len(text_lines))):
+                candidate = self._normalize_logan_text(text_lines[lookahead])
+                if not candidate:
+                    continue
+                if candidate.lower().startswith(("date of birth", "current grade", "gender", "student id", "id")):
+                    break
+                if not any(ch.isalpha() for ch in candidate):
+                    continue
+                if self._looks_like_person_name(candidate):
+                    return self._normalize_name_value(candidate)
+                if fallback_candidate is None:
+                    fallback_candidate = candidate
+            if fallback_candidate is not None:
+                return self._normalize_name_value(fallback_candidate)
+        return None
+
+    def _extract_school_report_wrapper_name(self, text_lines: List[str]) -> str | None:
+        for line in text_lines[:120]:
+            match = re.search(r"\bSR\s+([A-Za-z][A-Za-z'., -]+?)\s+CEEB:", line)
+            if match:
+                return self._normalize_name_value(match.group(1).strip())
+        return None
+
+    def _looks_like_person_name(self, value: str) -> bool:
+        compact = self._normalize_logan_text(value)
+        lowered = compact.lower()
+        if any(keyword in lowered for keyword in ("high school", "school", "university", "college", "academy", "district")):
+            return False
+        if any(char.isdigit() for char in compact):
+            return False
+        tokens = [token for token in re.split(r"[\s,]+", compact) if token]
+        if any(token.lower() in {"high", "school", "university", "college", "academy", "district"} for token in tokens):
+            return False
+        if not 2 <= len(tokens) <= 5:
+            return False
+        alpha_tokens = [token for token in tokens if any(ch.isalpha() for ch in token)]
+        return len(alpha_tokens) >= 2
 
     def _parse_school_report_address(self, text_lines: List[str]) -> Dict[str, Any]:
         address = {"street": None, "city": None, "state": None, "postal_code": None}
@@ -1937,10 +2171,16 @@ class TranscriptHeuristicParser:
             dob_match = re.search(r"\b(?:DOB|Date of Birth|Birth Date)[:\-]?\s*([0-9Xx/\-]{6,12})\b", line, re.IGNORECASE)
             if dob_match and not student["date_of_birth"]:
                 student["date_of_birth"] = dob_match.group(1)
+        if not student["name"]:
+            student["name"] = self._extract_labeled_name_value(text_lines, "Student Name")
         if not student["name"] and text_lines:
             first_line = text_lines[0].strip()
             if 2 <= len(first_line.split()) <= 5 and "course name" in first_line.lower():
                 student["name"] = self._normalize_name_value(first_line.split("Course Name")[0].strip())
+        if not student["name"]:
+            student["name"] = self._extract_top_name(text_lines)
+        if not student["name"]:
+            student["name"] = self._extract_school_report_wrapper_name(text_lines)
         student = self._parse_trailing_student_fields(text_lines, student)
         for idx, line in enumerate(text_lines[:40]):
             if re.search(r"(Permanent Address|Address as of)", line, re.IGNORECASE) and idx + 2 < len(text_lines):

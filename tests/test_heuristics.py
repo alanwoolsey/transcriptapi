@@ -680,3 +680,104 @@ def test_parser_handles_parchment_high_school_transcript_rows():
     assert by_title["English 12"]["credits"] == 2.0
     assert by_title["FE 11/12 S1"]["credits"] == 1.0
     assert by_title["PE 11/12/82"]["grade"] == "B"
+
+
+def test_parser_uses_school_report_wrapper_name_when_generic_parse_misses_name():
+    parser = TranscriptHeuristicParser()
+    text = """
+    Booher, Colten
+    CEEB: 060417 CAID: 44639945
+    FERPA: Waived
+    School report
+    Personal details
+    Name Ms. Denise Noffze, Guidance Counselor
+    Name Lutheran High School, 11249 Newlin Gulch Blvd, Parker, CO, USA,
+    GPA 3.7143 / 5, Weighted (08/2022 - 05/2025)
+    2024-2025 Lutheran High School
+    Algebra II /Trigonometry A C 1.00
+    """.strip()
+
+    parsed = parser.parse(text, "high_school_transcript")
+
+    assert parsed["student"]["name"] == "Colten Booher"
+
+
+def test_parser_uses_labeled_student_name_from_later_page_block():
+    parser = TranscriptHeuristicParser()
+    text = """
+    Example High School
+    Fall 2025
+    ENG101 English Composition 1.00 A
+    Student Name
+    Example High
+    School
+    Colten Timothy Booher
+    Date of Birth
+    01/01/2008
+    """.strip()
+
+    parsed = parser.parse(text, "high_school_transcript")
+
+    assert parsed["student"]["name"] == "Colten Timothy Booher"
+
+
+def test_parser_handles_student_achievement_summary_transcript_rows():
+    parser = TranscriptHeuristicParser()
+    text = """
+    Student Name
+    Lutheran High
+    School
+    Colten Timothy Booher
+    Date of Birth Current Grade Gender
+    12/11/2007 12 Male
+    Student Achievement Summary
+    Cumulative
+    GPA
+    Cumulative
+    UGPA
+    Weighted
+    Rank Out of Graduation Date
+    3.71 3.47 112 246CEEB code: 060417
+    9th Grade 10th Grade
+    2022-2023 Lutheran High School 2023-2024 Lutheran High School Grading ScaleCourse Title S1 S2 Credits Course Title S1 S2 Credits
+    Algebra I A C 1.00 Drawing I/Painting I A 0.50 Un-weighted grades:
+    Driver's Ed Sem 1 A 0.50 French II A A 1.00 A = 4 B = 3
+    Earth Science A 0.50 Geometry B B 1.00 C = 2 D = 1
+    Team Strength 2nd Sem A 0.50 Team Strength 1st Sem A 0.50
+    Theology I B B 1.00 Team Strength 2nd Sem A 0.50
+    World Geography B 0.50 Theology II B B 1.00 Weighted grades:
+    World Literature A A 1.00 Honors (H)
+    Annual GPA 3.67 7.50 and AP courses
+    11th Grade 12th Grade Standard Schedule
+    2024-2025 Lutheran High School 2025-2026 Lutheran High School 24 credits plus 0.5 credit of
+    Course Title S1 S2 Credits Course Title S1 S2 Credits
+    Algebra II /Trigonometry A C 1.00 AP Lit/Comp AP 0.00
+    AP Language AP B B 1.00 AP US Government AP 0.00
+    AP US History AP B A 1.00 Finance H 0.00
+    Drawing II/Painting II A 0.50 Physics: Electricity & Waves H 0.00
+    French III A A 1.00 Physics: Mechanics H 0.00
+    Honors General Chemistry H C 0.50 Pre-Calculus 0.00
+    Honors Inorganic Chemistry H C 0.50 Psychology 0.00
+    Personal Finance S A 0.50 Theology IV 0.00
+    Sales & Marketing B 0.50
+    Team Strength 1st Sem A 0.50 Annual GPA 0.00 0.00
+    Team Strength 2nd Sem A 0.50
+    Theology III B B 1.00
+    Annual GPA 3.65 8.50
+    """.strip()
+
+    parsed = parser.parse(text, "high_school_transcript")
+
+    assert parsed["student"]["name"] == "Colten Timothy Booher"
+    assert parsed["student"]["date_of_birth"] == "12/11/2007"
+    assert parsed["institutions"][0]["name"] == "Lutheran High School"
+    assert parsed["academic_summary"]["gpa"] == 3.71
+    assert parsed["academic_summary"]["class_rank"] == "112/246"
+    courses = [course for term in parsed["terms"] for course in term["courses"]]
+    assert len(courses) >= 18
+    by_title = {course["course_title"]: course for course in courses}
+    assert by_title["Algebra I"]["grade"] == "C"
+    assert by_title["Drawing I/Painting"]["credits"] == 0.5
+    assert by_title["AP Language"]["grade"] == "B"
+    assert by_title["AP Lit/Comp"]["credits"] == 0.0
+    assert by_title["Theology III"]["grade"] == "B"
