@@ -40,6 +40,56 @@ def test_parser_extracts_student_summary_and_courses():
     assert parsed["terms"][0]["courses"][0]["confidence_score"] >= 0.8
 
 
+def test_parser_handles_college_rows_with_grade_before_credits():
+    parser = TranscriptHeuristicParser()
+    text = """
+    Harbor Gate University
+    Student Name: Mira Holloway
+    Student ID: 2026-18473
+    Fall 2024
+    BIO101 Biology I A 4.0
+    ENG102 Composition B+ 3.0
+    MAT210 Applied Statistics TR 3.0
+    Cumulative GPA 3.42
+    Credits Attempted 10
+    Credits Earned 10
+    """.strip()
+
+    parsed = parser.parse(text, "college_transcript")
+
+    assert parsed["student"]["name"] == "Mira Holloway"
+    assert parsed["academic_summary"]["gpa"] == 3.42
+    assert len(parsed["terms"]) == 1
+    courses = parsed["terms"][0]["courses"]
+    assert [course["course_code"] for course in courses] == ["BIO101", "ENG102", "MAT210"]
+    assert courses[0]["grade"] == "A"
+    assert courses[0]["credits"] == 4.0
+    assert courses[1]["grade"] == "B+"
+    assert courses[2]["grade"] == "TR"
+
+
+def test_parser_merges_wrapped_course_title_continuation_rows():
+    parser = TranscriptHeuristicParser()
+    text = """
+    Example State University
+    Student Name: Avery Carter
+    Student ID: STU-10441
+    Spring 2025
+    NURS310 Community Health Nursing 4 A-
+    - clinical practicum and population health lab
+    PSYC205 Developmental Psychology 3 B+
+    """.strip()
+
+    parsed = parser.parse(text, "college_transcript")
+
+    assert len(parsed["terms"]) == 1
+    courses = parsed["terms"][0]["courses"]
+    assert courses[0]["course_code"] == "NURS310"
+    assert courses[0]["course_title"] == "Community Health Nursing clinical practicum and population health lab"
+    assert courses[0]["grade"] == "A-"
+    assert courses[1]["course_code"] == "PSYC205"
+
+
 def test_parser_merges_split_institution_name_fragments():
     parser = TranscriptHeuristicParser()
     text = """

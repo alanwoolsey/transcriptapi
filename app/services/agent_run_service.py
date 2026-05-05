@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import select
@@ -43,7 +44,7 @@ class AgentRunService:
             agent_type=agent_type,
             trigger_event=trigger_event,
             status=status,
-            input_json=input_json or {},
+            input_json=self._json_safe(input_json or {}),
             output_json={},
             correlation_id=correlation_id,
             started_at=datetime.now(timezone.utc),
@@ -91,7 +92,7 @@ class AgentRunService:
         error_message: str | None = None,
     ) -> AgentRun:
         run.status = status
-        run.output_json = output_json or {}
+        run.output_json = self._json_safe(output_json or {})
         run.error_message = error_message
         run.completed_at = datetime.now(timezone.utc)
         run.updated_at = datetime.now(timezone.utc)
@@ -121,8 +122,8 @@ class AgentRunService:
             action_type=action_type,
             tool_name=tool_name,
             status=status,
-            input_json=input_json or {},
-            output_json=output_json or {},
+            input_json=self._json_safe(input_json or {}),
+            output_json=self._json_safe(output_json or {}),
             error_message=error_message,
             started_at=datetime.now(timezone.utc),
             completed_at=datetime.now(timezone.utc),
@@ -156,7 +157,7 @@ class AgentRunService:
             to_agent_name=to_agent_name,
             status=status,
             reason=reason,
-            payload_json=payload_json or {},
+            payload_json=self._json_safe(payload_json or {}),
         )
         session.add(handoff)
         session.flush()
@@ -192,7 +193,7 @@ class AgentRunService:
         if current_stage is not None:
             state.current_stage = current_stage
         if state_json is not None:
-            state.state_json = state_json
+            state.state_json = self._json_safe(state_json)
         if last_document_run_id is not None:
             state.last_document_run_id = last_document_run_id
         if last_trust_run_id is not None:
@@ -204,3 +205,22 @@ class AgentRunService:
         state.updated_at = datetime.now(timezone.utc)
         session.flush()
         return state
+
+    def _json_safe(self, value):
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, UUID):
+            return str(value)
+        if isinstance(value, (datetime, date)):
+            if isinstance(value, datetime) and value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            if isinstance(value, datetime):
+                return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return float(value)
+        if isinstance(value, dict):
+            return {str(key): self._json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [self._json_safe(item) for item in value]
+        return str(value)

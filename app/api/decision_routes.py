@@ -7,11 +7,16 @@ from app.api.dependencies import AuthenticatedTenantContext, get_current_tenant_
 from app.db import get_db
 from app.models.decision_models import (
     CreateDecisionRequest,
+    DecisionAgentDetailsResponse,
     DecisionAssignRequest,
     DecisionAssignResponse,
     DecisionDetailResponse,
     DecisionNoteCreateRequest,
     DecisionNoteItem,
+    DecisionReviewRequest,
+    DecisionReviewResponse,
+    DecisionSnapshotResponse,
+    DecisionRecommendationRunResponse,
     DecisionStatusUpdateRequest,
     DecisionStatusUpdateResponse,
     DecisionTimelineEvent,
@@ -58,6 +63,68 @@ def get_decision_detail(
 ) -> DecisionDetailResponse:
     try:
         return decision_service.get_decision_detail(auth_context.tenant.id, decision_id)
+    except DecisionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{decision_id}/snapshot", response_model=DecisionSnapshotResponse)
+def get_decision_snapshot(
+    decision_id: UUID,
+    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+) -> DecisionSnapshotResponse:
+    try:
+        return decision_service.get_snapshot(auth_context.tenant.id, decision_id)
+    except DecisionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{decision_id}/recommendation", response_model=DecisionRecommendationRunResponse)
+def generate_decision_recommendation(
+    decision_id: UUID,
+    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    db: Session = Depends(get_db),
+) -> DecisionRecommendationRunResponse:
+    try:
+        return decision_service.generate_recommendation(
+            db=db,
+            tenant_id=auth_context.tenant.id,
+            actor_user_id=auth_context.user.id,
+            decision_id=decision_id,
+        )
+    except DecisionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DecisionValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{decision_id}/review", response_model=DecisionReviewResponse)
+def review_decision_recommendation(
+    decision_id: UUID,
+    payload: DecisionReviewRequest,
+    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    db: Session = Depends(get_db),
+) -> DecisionReviewResponse:
+    try:
+        return decision_service.review_recommendation(
+            db=db,
+            tenant_id=auth_context.tenant.id,
+            actor_user_id=auth_context.user.id,
+            decision_id=decision_id,
+            payload=payload,
+        )
+    except DecisionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DecisionValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/{decision_id}/agent-details", response_model=DecisionAgentDetailsResponse)
+def get_decision_agent_details(
+    decision_id: UUID,
+    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+) -> DecisionAgentDetailsResponse:
+    try:
+        return decision_service.get_agent_details(auth_context.tenant.id, decision_id)
     except DecisionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

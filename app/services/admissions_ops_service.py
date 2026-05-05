@@ -9,6 +9,7 @@ from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    AgentAction,
     AgentRun,
     AppUser,
     AuditEvent,
@@ -26,6 +27,7 @@ from app.db.models import (
     StudentDecisionReadiness,
     StudentPriorityScore,
     StudentSignal,
+    StudentAgentState,
     StudentWorkState,
     Transcript,
     TranscriptDemographics,
@@ -47,7 +49,18 @@ from app.models.ops_models import (
     WorkItemsResponse,
     WorkSummaryCounts,
     WorkSummaryResponse,
+    WorkTodayBoardResponse,
+    WorkTodayGroupResponse,
+    WorkTodayGroupRouteHint,
+    WorkTodayRecommendationResponse,
+    WorkTodayOrchestrationResponse,
+    WorkTodayRouteRequest,
+    WorkTodayRouteResponse,
+    WorkTodayAgentSummary,
+    WorkTodayItemResponse,
+    WorkTodayResponse,
 )
+from app.services.agent_run_service import AgentRunService
 from app.services.work_state_projector import WorkStateProjector
 
 
@@ -73,6 +86,7 @@ class AdmissionsOpsService:
     def __init__(self, session_factory=None) -> None:
         self.session_factory = session_factory or get_session_factory
         self.work_state_projector = WorkStateProjector(session_factory=self.session_factory)
+        self.agent_run_service = AgentRunService(session_factory=self.session_factory)
 
     def get_student_checklist(self, tenant_id: UUID, student_id: str) -> list[ChecklistItemResponse]:
         session_factory = self.session_factory()
@@ -194,23 +208,347 @@ class AdmissionsOpsService:
         self.work_state_projector.ensure_tenant_projection(tenant_id)
         session_factory = self.session_factory()
         with session_factory() as session:
+            stmt = self._projected_work_items_query(
+                tenant_id,
+                section=section,
+                population=population,
+                owner=owner,
+                priority=priority,
+                aging_bucket=aging_bucket,
+                q=q,
+            )
+            total = int(session.execute(select(func.count()).select_from(stmt.subquery())).scalar_one() or 0)
             projected_rows = session.execute(
-                select(StudentWorkState)
-                .where(StudentWorkState.tenant_id == tenant_id)
-                .order_by(
+                stmt.order_by(
                     StudentWorkState.priority_score.desc().nullslast(),
                     StudentWorkState.projected_at.desc(),
                 )
+                .offset(offset)
+                .limit(limit)
             ).scalars().all()
-            work_items = [self._build_projected_work_item(row) for row in projected_rows]
-            filtered = [
-                item for item in work_items
-                if self._matches_work_filters(item, section=section, population=population, owner=owner, priority=priority, aging_bucket=aging_bucket, q=q)
-            ]
-            total = len(filtered)
-            paged = filtered[offset: offset + limit]
+            paged = [self._build_projected_work_item(row) for row in projected_rows]
             session.commit()
             return WorkItemsResponse(items=paged, page=(offset // limit) + 1, pageSize=limit, total=total)
+
+    def get_today_work(self, tenant_id: UUID, *, limit: int = 25) -> WorkTodayResponse:
+        self.work_state_projector.ensure_tenant_projection(tenant_id)
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            rows, agent_state_by_student, run_by_id = self._load_today_work_context(session, tenant_id)
+            items = [
+                self._build_today_work_item(
+                    row,
+                    agent_state_by_student.get(row.student_id),
+                    run_by_id,
+                )
+                for row in rows[:limit]
+            ]
+            session.commit()
+            return WorkTodayResponse(items=items, total=len(rows))
+
+    def get_today_work_board(self, tenant_id: UUID, *, limit: int = 50) -> WorkTodayBoardResponse:
+        self.work_state_projector.ensure_tenant_projection(tenant_id)
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            rows, agent_state_by_student, run_by_id = self._load_today_work_context(session, tenant_id)
+            items = [
+                self._build_today_work_item(
+                    row,
+                    agent_state_by_student.get(row.student_id),
+                    run_by_id,
+                )
+                for row in rows[:limit]
+            ]
+            groups = self._group_today_work_items(items)
+            session.commit()
+            return WorkTodayBoardResponse(groups=groups, total=len(rows))
+
+    def orchestrate_today_work(
+        self,
+        db: Session,
+        tenant_id: UUID,
+        actor_user_id: UUID,
+        *,
+        limit: int = 50,
+    ) -> WorkTodayOrchestrationResponse:
+        self.work_state_projector.ensure_tenant_projection(tenant_id)
+        rows, agent_state_by_student, run_by_id = self._load_today_work_context(db, tenant_id)
+        items = [
+            self._build_today_work_item(
+                row,
+                agent_state_by_student.get(row.student_id),
+                run_by_id,
+            )
+            for row in rows[:limit]
+        ]
+        board = WorkTodayBoardResponse(groups=self._group_today_work_items(items), total=len(rows))
+
+        run = self.agent_run_service.create_run(
+            db,
+            tenant_id=tenant_id,
+            agent_name="orchestrator_agent",
+            agent_type="orchestrator",
+            trigger_event="manual_today_work_orchestration",
+            status="running",
+            actor_user_id=actor_user_id,
+            correlation_id=f"today-work:{actor_user_id}",
+            input_json={
+                "limit": limit,
+                "total_candidates": len(rows),
+            },
+        )
+
+        actions: list[AgentRunActionItemResponse] = []
+        for group in board.groups:
+            action = self.agent_run_service.record_action(
+                db,
+                tenant_id=tenant_id,
+                run_id=run.id,
+                action_type="prioritize_today_work_group",
+                tool_name="prioritize_today_work_group",
+                status="completed",
+                input_json={
+                    "groupKey": group.key,
+                    "limit": limit,
+                },
+                output_json={
+                    "status": "completed",
+                    "code": "today_work_group_prioritized",
+                    "message": f"{group.label} queue grouped.",
+                    "error": None,
+                    "metrics": {
+                        "groupTotal": group.total,
+                    },
+                    "artifacts": {
+                        "groupKey": group.key,
+                        "studentIds": [item.studentId for item in group.items],
+                        "recommendedAgents": sorted({item.recommendedAgent for item in group.items if item.recommendedAgent}),
+                        "routeHint": self._model_dump(group.routeHint) if group.routeHint else {},
+                    },
+                },
+            )
+            actions.append(self._serialize_agent_action(action))
+
+        self.agent_run_service.complete_run(
+            db,
+            run=run,
+            status="completed",
+            output_json={
+                "status": "completed",
+                "code": "today_work_prioritized",
+                "message": "Today's work prioritized and grouped.",
+                "error": None,
+                "metrics": {
+                    "totalStudents": len(items),
+                    "groupCount": len(board.groups),
+                },
+                "artifacts": {
+                    "groupKeys": [group.key for group in board.groups],
+                    "boardSnapshot": self._model_dump(board),
+                },
+            },
+        )
+
+        for row in rows[:limit]:
+            self.agent_run_service.upsert_student_state(
+                db,
+                tenant_id=tenant_id,
+                student_id=row.student_id,
+                last_orchestrator_run_id=run.id,
+            )
+
+        db.commit()
+        return WorkTodayOrchestrationResponse(
+            agentRunId=str(run.id),
+            board=board,
+            run=self._serialize_agent_run(run),
+            actions=actions,
+        )
+
+    def get_latest_today_work_orchestration(
+        self,
+        tenant_id: UUID,
+        *,
+        student_id: str | None = None,
+    ) -> WorkTodayOrchestrationResponse:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            run: AgentRun | None = None
+            if student_id:
+                projected = session.execute(
+                    select(StudentWorkState).where(
+                        StudentWorkState.tenant_id == tenant_id,
+                        StudentWorkState.student_identifier == student_id,
+                    ).limit(1)
+                ).scalar_one_or_none()
+                if projected is None:
+                    raise AdmissionsOpsNotFoundError("Work item not found.")
+
+                state = session.execute(
+                    select(StudentAgentState).where(
+                        StudentAgentState.tenant_id == tenant_id,
+                        StudentAgentState.student_id == projected.student_id,
+                    ).limit(1)
+                ).scalar_one_or_none()
+                if state and state.last_orchestrator_run_id:
+                    run = session.execute(
+                        select(AgentRun).where(
+                            AgentRun.tenant_id == tenant_id,
+                            AgentRun.id == state.last_orchestrator_run_id,
+                        ).limit(1)
+                    ).scalar_one_or_none()
+            else:
+                run = session.execute(
+                    select(AgentRun)
+                    .where(
+                        AgentRun.tenant_id == tenant_id,
+                        AgentRun.agent_name == "orchestrator_agent",
+                    )
+                    .order_by(AgentRun.created_at.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+
+            if run is None:
+                raise AdmissionsOpsNotFoundError("Orchestrator run not found.")
+
+            actions = [
+                self._serialize_agent_action(action)
+                for action in self.agent_run_service.list_actions(
+                    session,
+                    tenant_id=tenant_id,
+                    run_id=run.id,
+                )
+            ]
+            board_snapshot = self._board_snapshot_from_run(run)
+            session.commit()
+            return WorkTodayOrchestrationResponse(
+                agentRunId=str(run.id),
+                board=board_snapshot,
+                run=self._serialize_agent_run(run),
+                actions=actions,
+            )
+
+    def route_today_work(
+        self,
+        db: Session,
+        tenant_id: UUID,
+        actor_user_id: UUID,
+        student_id: str,
+        payload: WorkTodayRouteRequest,
+    ) -> WorkTodayRouteResponse:
+        next_agent = payload.nextAgent.strip().lower()
+        if next_agent not in {"document_agent", "trust_agent", "decision_agent"}:
+            raise AdmissionsOpsValidationError("Invalid next agent.")
+
+        projected = db.execute(
+            select(StudentWorkState).where(
+                StudentWorkState.tenant_id == tenant_id,
+                StudentWorkState.student_identifier == student_id,
+            ).limit(1)
+        ).scalar_one_or_none()
+        if projected is None:
+            raise AdmissionsOpsNotFoundError("Work item not found.")
+
+        existing_state = db.execute(
+            select(StudentAgentState).where(
+                StudentAgentState.tenant_id == tenant_id,
+                StudentAgentState.student_id == projected.student_id,
+            ).limit(1)
+        ).scalar_one_or_none()
+        previous_owner_agent = existing_state.current_owner_agent if existing_state else None
+
+        state = self.agent_run_service.upsert_student_state(
+            db,
+            tenant_id=tenant_id,
+            student_id=projected.student_id,
+            current_owner_agent=next_agent,
+            current_stage="routed",
+            state_json={
+                "route_note": payload.note,
+                "routed_by_user_id": actor_user_id,
+                "routed_at": datetime.now(timezone.utc),
+            },
+        )
+        self.agent_run_service.record_handoff(
+            db,
+            tenant_id=tenant_id,
+            student_id=projected.student_id,
+            from_agent_name=(previous_owner_agent or "ops_queue"),
+            to_agent_name=next_agent,
+            status="requested",
+            reason=(payload.note.strip() if payload.note else None),
+            payload_json={
+                "student_id": student_id,
+                "section": projected.section,
+                "priority": projected.priority,
+                "suggested_action_code": projected.suggested_action_code,
+            },
+        )
+        db.commit()
+        return WorkTodayRouteResponse(
+            studentId=student_id,
+            nextAgent=next_agent,
+            currentStage="routed",
+            detail=f"Work item routed to {next_agent}.",
+        )
+
+    def get_today_work_recommendation(
+        self,
+        tenant_id: UUID,
+        *,
+        student_id: str,
+    ) -> WorkTodayRecommendationResponse:
+        self.work_state_projector.ensure_tenant_projection(tenant_id)
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            projected = session.execute(
+                select(StudentWorkState).where(
+                    StudentWorkState.tenant_id == tenant_id,
+                    StudentWorkState.student_identifier == student_id,
+                ).limit(1)
+            ).scalar_one_or_none()
+            if projected is None:
+                raise AdmissionsOpsNotFoundError("Work item not found.")
+
+            agent_state = session.execute(
+                select(StudentAgentState).where(
+                    StudentAgentState.tenant_id == tenant_id,
+                    StudentAgentState.student_id == projected.student_id,
+                ).limit(1)
+            ).scalar_one_or_none()
+
+            run_ids = [
+                run_id
+                for run_id in (
+                    agent_state.last_document_run_id if agent_state else None,
+                    agent_state.last_trust_run_id if agent_state else None,
+                    agent_state.last_decision_run_id if agent_state else None,
+                )
+                if run_id is not None
+            ]
+            runs = session.execute(
+                select(AgentRun).where(
+                    AgentRun.tenant_id == tenant_id,
+                    AgentRun.id.in_(run_ids),
+                )
+            ).scalars().all() if run_ids else []
+            run_by_id = {run.id: run for run in runs}
+
+            recommended_agent, reason = self._recommend_today_agent(
+                projected,
+                agent_state,
+                document_run=run_by_id.get(agent_state.last_document_run_id) if agent_state and agent_state.last_document_run_id else None,
+                trust_run=run_by_id.get(agent_state.last_trust_run_id) if agent_state and agent_state.last_trust_run_id else None,
+                decision_run=run_by_id.get(agent_state.last_decision_run_id) if agent_state and agent_state.last_decision_run_id else None,
+            )
+            session.commit()
+            return WorkTodayRecommendationResponse(
+                studentId=student_id,
+                recommendedAgent=recommended_agent,
+                currentOwnerAgent=(agent_state.current_owner_agent if agent_state else None),
+                currentStage=(agent_state.current_stage if agent_state else None),
+                reason=reason,
+            )
 
     def link_document_to_checklist_item(
         self,
@@ -881,6 +1219,323 @@ class AdmissionsOpsService:
             lastActivity=self._relative_time(row.last_activity_at),
             updatedAt=self._isoformat(row.last_activity_at),
         )
+
+    def _projected_work_items_query(
+        self,
+        tenant_id: UUID,
+        *,
+        section: str | None,
+        population: str | None,
+        owner: str | None,
+        priority: str | None,
+        aging_bucket: str | None,
+        q: str | None,
+    ) -> Select:
+        stmt = select(StudentWorkState).where(StudentWorkState.tenant_id == tenant_id)
+        if section:
+            stmt = stmt.where(StudentWorkState.section == section)
+        if population:
+            stmt = stmt.where(StudentWorkState.population == population)
+        if priority:
+            stmt = stmt.where(StudentWorkState.priority == priority)
+        if owner and owner.strip():
+            owner_value = owner.strip()
+            try:
+                owner_id = UUID(owner_value)
+            except ValueError:
+                owner_id = None
+            if owner_id is not None:
+                stmt = stmt.where(StudentWorkState.owner_user_id == owner_id)
+            else:
+                stmt = stmt.where(func.lower(StudentWorkState.owner_name) == owner_value.lower())
+        if aging_bucket:
+            now = datetime.now(timezone.utc)
+            if aging_bucket == "recent":
+                stmt = stmt.where(StudentWorkState.last_activity_at >= now - timedelta(days=1))
+            elif aging_bucket == "stale":
+                stmt = stmt.where(StudentWorkState.last_activity_at < now - timedelta(days=1))
+        if q and q.strip():
+            pattern = f"%{q.strip()}%"
+            stmt = stmt.where(
+                or_(
+                    StudentWorkState.student_name.ilike(pattern),
+                    StudentWorkState.program.ilike(pattern),
+                    StudentWorkState.institution_goal.ilike(pattern),
+                    StudentWorkState.reason_label.ilike(pattern),
+                )
+            )
+        return stmt
+
+    def _build_today_work_item(
+        self,
+        row: StudentWorkState,
+        agent_state: StudentAgentState | None,
+        run_by_id: dict[UUID, AgentRun],
+    ) -> WorkTodayItemResponse:
+        document_run = run_by_id.get(agent_state.last_document_run_id) if agent_state and agent_state.last_document_run_id else None
+        trust_run = run_by_id.get(agent_state.last_trust_run_id) if agent_state and agent_state.last_trust_run_id else None
+        decision_run = run_by_id.get(agent_state.last_decision_run_id) if agent_state and agent_state.last_decision_run_id else None
+        recommended_agent, _reason = self._recommend_today_agent(
+            row,
+            agent_state,
+            document_run=document_run,
+            trust_run=trust_run,
+            decision_run=decision_run,
+        )
+        return WorkTodayItemResponse(
+            id=f"work_{row.student_id.hex[:12]}",
+            studentId=row.student_identifier,
+            studentName=row.student_name,
+            section=row.section,
+            priority=row.priority,
+            priorityScore=row.priority_score,
+            owner=WorkItemOwner(id=(str(row.owner_user_id) if row.owner_user_id else None), name=row.owner_name),
+            reasonToAct=WorkItemReason(code=row.reason_code, label=row.reason_label),
+            suggestedAction=WorkItemReason(code=row.suggested_action_code, label=row.suggested_action_label),
+            currentOwnerAgent=(agent_state.current_owner_agent if agent_state else None),
+            currentStage=(agent_state.current_stage if agent_state else None),
+            recommendedAgent=recommended_agent,
+            queueGroup=self._today_queue_group(recommended_agent),
+            documentAgent=self._build_today_agent_summary(document_run),
+            trustAgent=self._build_today_agent_summary(trust_run),
+            decisionAgent=self._build_today_agent_summary(decision_run),
+            updatedAt=self._isoformat(row.last_activity_at),
+        )
+
+    def _build_today_agent_summary(self, run: AgentRun | None) -> WorkTodayAgentSummary | None:
+        if run is None:
+            return None
+        output = run.output_json if isinstance(run.output_json, dict) else {}
+        result_code = output.get("code") if isinstance(output.get("code"), str) else None
+        return WorkTodayAgentSummary(
+            runId=str(run.id),
+            status=run.status,
+            resultCode=result_code,
+            updatedAt=self._isoformat(run.completed_at or run.updated_at or run.started_at),
+        )
+
+    def _recommend_today_agent(
+        self,
+        projected: StudentWorkState,
+        agent_state: StudentAgentState | None,
+        *,
+        document_run: AgentRun | None,
+        trust_run: AgentRun | None,
+        decision_run: AgentRun | None,
+    ) -> tuple[str, str]:
+        suggested_action = (projected.suggested_action_code or "").lower()
+        section = (projected.section or "").lower()
+        trust_result = self._agent_result_code(trust_run)
+        decision_result = self._agent_result_code(decision_run)
+        document_result = self._agent_result_code(document_run)
+
+        if (
+            section == "exceptions"
+            or suggested_action == "review_trust"
+            or trust_result in {"trust_document_quarantined", "trust_case_blocked", "trust_case_escalated", "document_match_rejected"}
+        ):
+            return ("trust_agent", "Trust-related blockers are active, so trust review should own the next step.")
+
+        if (
+            section == "ready"
+            or suggested_action in {"move_to_decision", "review_recommendation"}
+            or decision_result == "decision_recommendation_generated"
+        ):
+            return ("decision_agent", "The student is ready for decision review, so decision handling should own the next step.")
+
+        if document_result == "document_processing_failed":
+            return ("document_agent", "Document processing failed on the latest run, so document handling should own the retry path.")
+
+        if agent_state and agent_state.current_owner_agent in {"document_agent", "trust_agent", "decision_agent"}:
+            return (
+                agent_state.current_owner_agent,
+                "The current owner agent is still the best next owner based on the latest projected state.",
+            )
+
+        return ("document_agent", "Document intake is the safest default owner when no stronger trust or decision signal is present.")
+
+    def _agent_result_code(self, run: AgentRun | None) -> str | None:
+        if run is None or not isinstance(run.output_json, dict):
+            return None
+        result_code = run.output_json.get("code")
+        return result_code if isinstance(result_code, str) else None
+
+    def _load_today_work_context(
+        self,
+        session: Session,
+        tenant_id: UUID,
+    ) -> tuple[list[StudentWorkState], dict[UUID, StudentAgentState], dict[UUID, AgentRun]]:
+        rows = session.execute(
+            select(StudentWorkState)
+            .where(
+                StudentWorkState.tenant_id == tenant_id,
+                StudentWorkState.priority.in_(["urgent", "today"]),
+            )
+            .order_by(
+                StudentWorkState.priority_score.desc().nullslast(),
+                StudentWorkState.projected_at.desc(),
+            )
+        ).scalars().all()
+        student_ids = [row.student_id for row in rows]
+        agent_states = session.execute(
+            select(StudentAgentState)
+            .where(
+                StudentAgentState.tenant_id == tenant_id,
+                StudentAgentState.student_id.in_(student_ids),
+            )
+        ).scalars().all() if student_ids else []
+        agent_state_by_student = {state.student_id: state for state in agent_states}
+
+        run_ids: set[UUID] = set()
+        for state in agent_states:
+            for run_id in (state.last_document_run_id, state.last_trust_run_id, state.last_decision_run_id):
+                if run_id is not None:
+                    run_ids.add(run_id)
+        runs = session.execute(
+            select(AgentRun).where(
+                AgentRun.tenant_id == tenant_id,
+                AgentRun.id.in_(run_ids),
+            )
+        ).scalars().all() if run_ids else []
+        run_by_id = {run.id: run for run in runs}
+        return rows, agent_state_by_student, run_by_id
+
+    def _group_today_work_items(self, items: list[WorkTodayItemResponse]) -> list[WorkTodayGroupResponse]:
+        group_order = ["trust_review", "decision_review", "document_recovery", "general_follow_up"]
+        group_labels = {
+            "trust_review": "Trust Review",
+            "decision_review": "Decision Review",
+            "document_recovery": "Document Recovery",
+            "general_follow_up": "General Follow-Up",
+        }
+        grouped_items: dict[str, list[WorkTodayItemResponse]] = {key: [] for key in group_order}
+        for item in items:
+            grouped_items.setdefault(item.queueGroup or "general_follow_up", []).append(item)
+
+        groups: list[WorkTodayGroupResponse] = []
+        for key in group_order:
+            members = grouped_items.get(key, [])
+            if not members:
+                continue
+            groups.append(
+                WorkTodayGroupResponse(
+                    key=key,
+                    label=group_labels[key],
+                    total=len(members),
+                    routeHint=self._group_route_hint(key, members),
+                    items=members,
+                )
+            )
+        return groups
+
+    def _today_queue_group(self, recommended_agent: str) -> str:
+        if recommended_agent == "trust_agent":
+            return "trust_review"
+        if recommended_agent == "decision_agent":
+            return "decision_review"
+        if recommended_agent == "document_agent":
+            return "document_recovery"
+        return "general_follow_up"
+
+    def _group_route_hint(
+        self,
+        group_key: str,
+        members: list[WorkTodayItemResponse],
+    ) -> WorkTodayGroupRouteHint:
+        if group_key == "trust_review":
+            return WorkTodayGroupRouteHint(
+                nextAgent="trust_agent",
+                reason="Trust blockers or trust-review signals are driving this queue.",
+                actionLabel="Route to trust review",
+            )
+        if group_key == "decision_review":
+            return WorkTodayGroupRouteHint(
+                nextAgent="decision_agent",
+                reason="These students are ready for recommendation or decision review.",
+                actionLabel="Route to decision review",
+            )
+        if group_key == "document_recovery":
+            return WorkTodayGroupRouteHint(
+                nextAgent="document_agent",
+                reason="Document intake or recovery work is the next required step.",
+                actionLabel="Route to document recovery",
+            )
+        fallback_agent = next(
+            (item.recommendedAgent for item in members if item.recommendedAgent),
+            "document_agent",
+        )
+        return WorkTodayGroupRouteHint(
+            nextAgent=fallback_agent,
+            reason="General follow-up work still needs a clear next owner.",
+            actionLabel="Route to follow-up owner",
+        )
+
+    def _serialize_agent_run(self, run: AgentRun) -> AgentRunStatusResponse:
+        return AgentRunStatusResponse(
+            runId=str(run.id),
+            agentName=run.agent_name,
+            agentType=run.agent_type,
+            status=run.status,
+            triggerEvent=run.trigger_event,
+            studentId=(str(run.student_id) if run.student_id else None),
+            transcriptId=(str(run.transcript_id) if run.transcript_id else None),
+            actorUserId=(str(run.actor_user_id) if run.actor_user_id else None),
+            correlationId=run.correlation_id,
+            error=run.error_message,
+            startedAt=self._isoformat(run.started_at),
+            completedAt=self._isoformat(run.completed_at),
+            result=self._build_agent_run_result(run.output_json),
+        )
+
+    def _serialize_agent_action(self, action: AgentAction) -> AgentRunActionItemResponse:
+        return AgentRunActionItemResponse(
+            actionId=str(action.id),
+            actionType=action.action_type,
+            toolName=action.tool_name,
+            status=action.status,
+            studentId=(str(action.student_id) if action.student_id else None),
+            transcriptId=(str(action.transcript_id) if action.transcript_id else None),
+            error=action.error_message,
+            startedAt=self._isoformat(action.started_at),
+            completedAt=self._isoformat(action.completed_at),
+            result=self._build_agent_run_result(action.output_json),
+            input=action.input_json if isinstance(action.input_json, dict) else {},
+            output=action.output_json if isinstance(action.output_json, dict) else {},
+        )
+
+    def _build_agent_run_result(self, payload: dict | None):
+        from app.models.operations_models import AgentRunResultResponse
+
+        if not isinstance(payload, dict):
+            return None
+        status = payload.get("status")
+        code = payload.get("code")
+        message = payload.get("message")
+        if not all(isinstance(value, str) for value in (status, code, message)):
+            return None
+        return AgentRunResultResponse(
+            status=status,
+            code=code,
+            message=message,
+            error=(payload.get("error") if isinstance(payload.get("error"), str) else None),
+            metrics=(payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}),
+            artifacts=(payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}),
+        )
+
+    def _board_snapshot_from_run(self, run: AgentRun) -> WorkTodayBoardResponse:
+        artifacts = run.output_json.get("artifacts") if isinstance(run.output_json, dict) else {}
+        snapshot = artifacts.get("boardSnapshot") if isinstance(artifacts, dict) else None
+        if isinstance(snapshot, dict):
+            return WorkTodayBoardResponse(**snapshot)
+
+        metrics = run.output_json.get("metrics") if isinstance(run.output_json, dict) else {}
+        total_students = metrics.get("totalStudents") if isinstance(metrics, dict) and isinstance(metrics.get("totalStudents"), int) else 0
+        return WorkTodayBoardResponse(groups=[], total=total_students)
+
+    def _model_dump(self, model):
+        if hasattr(model, "model_dump"):
+            return model.model_dump()
+        return model.dict()
 
     def _matches_work_filters(
         self,

@@ -86,6 +86,15 @@ class DocumentReprocessStartResponse(ActionResponse):
     agentRunId: str
 
 
+class AgentRunResultResponse(BaseModel):
+    status: str
+    code: str
+    message: str
+    error: str | None = None
+    metrics: dict = Field(default_factory=dict)
+    artifacts: dict = Field(default_factory=dict)
+
+
 class AgentRunStatusResponse(BaseModel):
     runId: str
     agentName: str
@@ -99,6 +108,7 @@ class AgentRunStatusResponse(BaseModel):
     error: str | None = None
     startedAt: str | None = None
     completedAt: str | None = None
+    result: AgentRunResultResponse | None = None
 
 
 class AgentRunActionItemResponse(BaseModel):
@@ -111,6 +121,7 @@ class AgentRunActionItemResponse(BaseModel):
     error: str | None = None
     startedAt: str | None = None
     completedAt: str | None = None
+    result: AgentRunResultResponse | None = None
     input: dict = Field(default_factory=dict)
     output: dict = Field(default_factory=dict)
 

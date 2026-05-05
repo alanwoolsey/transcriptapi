@@ -131,6 +131,147 @@ def test_get_decision_detail_returns_packet(monkeypatch):
     assert response.json()["student"]["name"] == "Avery Carter"
 
 
+def test_generate_decision_recommendation_returns_agent_run(monkeypatch):
+    from app.api import decision_routes
+
+    monkeypatch.setattr(
+        decision_routes.decision_service,
+        "generate_recommendation",
+        lambda **kwargs: {
+            "decisionId": str(kwargs["decision_id"]),
+            "agentRunId": "run-1",
+            "recommendation": {"fit": 92, "creditEstimate": 38, "reason": "Explainable rationale text"},
+            "status": "completed",
+        },
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.post(f"/api/v1/decisions/{uuid4()}/recommendation")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["agentRunId"] == "run-1"
+    assert payload["recommendation"]["fit"] == 92
+
+
+def test_review_decision_recommendation_returns_status(monkeypatch):
+    from app.api import decision_routes
+
+    monkeypatch.setattr(
+        decision_routes.decision_service,
+        "review_recommendation",
+        lambda **kwargs: {
+            "id": str(kwargs["decision_id"]),
+            "action": kwargs["payload"].action,
+            "status": "Approved",
+            "snapshotVersion": "4d0f13d56a1c2b33",
+            "updatedAt": "2026-05-05T18:12:00Z",
+        },
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.post(
+        f"/api/v1/decisions/{uuid4()}/review",
+        json={"action": "accept_recommendation", "note": "Recommendation accepted."},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "accept_recommendation"
+    assert payload["status"] == "Approved"
+    assert payload["snapshotVersion"] == "4d0f13d56a1c2b33"
+
+
+def test_get_decision_snapshot_returns_snapshot(monkeypatch):
+    from app.api import decision_routes
+
+    monkeypatch.setattr(
+        decision_routes.decision_service,
+        "get_snapshot",
+        lambda tenant_id, decision_id: {
+            "decisionId": str(decision_id),
+            "status": "Draft",
+            "readiness": "Ready for review",
+            "student": {"id": "student-1", "name": "Avery Carter", "email": "avery@example.com", "externalId": "STU-10441"},
+            "program": {"id": None, "name": "Nursing transfer review"},
+            "recommendation": {"fit": 92, "creditEstimate": 38, "reason": "Explainable rationale text"},
+            "evidence": {"institution": "Harbor Gate University", "gpa": 3.42, "creditsEarned": 42, "parserConfidence": 0.96, "documentCount": 3},
+            "trust": {"status": "Clear", "signals": []},
+        },
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.get(f"/api/v1/decisions/{uuid4()}/snapshot")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["recommendation"]["fit"] == 92
+    assert payload["evidence"]["documentCount"] == 3
+
+
+def test_get_decision_agent_details_returns_latest_run(monkeypatch):
+    from app.api import decision_routes
+
+    monkeypatch.setattr(
+        decision_routes.decision_service,
+        "get_agent_details",
+        lambda tenant_id, decision_id: {
+            "decisionId": str(decision_id),
+            "student": {"id": "student-1", "name": "Avery Carter", "email": "avery@example.com", "externalId": "STU-10441"},
+            "program": {"id": None, "name": "Nursing transfer review"},
+            "recommendation": {"fit": 92, "creditEstimate": 38, "reason": "Explainable rationale text"},
+            "latestRun": {
+                "runId": "run-1",
+                "agentName": "decision_agent",
+                "agentType": "decision",
+                "status": "completed",
+                "triggerEvent": "manual_recommendation",
+                "studentId": "student-1",
+                "transcriptId": str(decision_id),
+                "actorUserId": "user-1",
+                "correlationId": "decision-recommend:1",
+                "error": None,
+                "startedAt": "2026-05-05T18:11:10Z",
+                "completedAt": "2026-05-05T18:11:12Z",
+                "result": {
+                    "status": "completed",
+                    "code": "decision_recommendation_generated",
+                    "message": "Decision recommendation generated.",
+                    "error": None,
+                    "metrics": {"fit": 92},
+                    "artifacts": {"decisionId": str(decision_id)},
+                },
+            },
+            "actions": [],
+            "lastReviewedSnapshot": {
+                "action": "accept_recommendation",
+                "snapshotVersion": "4d0f13d56a1c2b33",
+                "reviewedAt": "2026-05-05T18:12:00Z",
+                "reviewedByUserId": "user-1",
+                "snapshot": {
+                    "decisionId": str(decision_id),
+                    "status": "Draft",
+                    "readiness": "Ready for review",
+                    "student": {"id": "student-1", "name": "Avery Carter", "email": "avery@example.com", "externalId": "STU-10441"},
+                    "program": {"id": None, "name": "Nursing transfer review"},
+                    "recommendation": {"fit": 92, "creditEstimate": 38, "reason": "Explainable rationale text"},
+                    "evidence": {"institution": "Harbor Gate University", "gpa": 3.42, "creditsEarned": 42, "parserConfidence": 0.96, "documentCount": 3},
+                    "trust": {"status": "Clear", "signals": []},
+                },
+            },
+        },
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.get(f"/api/v1/decisions/{uuid4()}/agent-details")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["latestRun"]["agentName"] == "decision_agent"
+    assert payload["latestRun"]["result"]["code"] == "decision_recommendation_generated"
+    assert payload["lastReviewedSnapshot"]["snapshotVersion"] == "4d0f13d56a1c2b33"
+
+
 def test_update_decision_status_returns_updated_status(monkeypatch):
     from app.api import decision_routes
 

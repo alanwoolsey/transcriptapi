@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.base import AgentExecutionContext
 from app.agents.document_agent import DocumentAgent, DocumentAgentInput
+from app.agents.trust_agent import TrustAgent, TrustAgentInput
 from app.db.models import (
     AUTHZ_SCHEMA,
     AppUser,
@@ -42,7 +43,13 @@ from app.db.models import (
     WorkflowCase,
 )
 from app.db.session import get_session_factory
-from app.models.ops_models import DocumentExceptionSummaryAction, DocumentExceptionSummaryResponse, DocumentExceptionSummaryRun
+from app.models.ops_models import (
+    DocumentAgentRunDetailsResponse,
+    DocumentAgentRunFailureResponse,
+    DocumentExceptionSummaryAction,
+    DocumentExceptionSummaryResponse,
+    DocumentExceptionSummaryRun,
+)
 from app.models.operations_models import (
     ActionResponse,
     AdminChecklistTemplateItem,
@@ -61,6 +68,7 @@ from app.models.operations_models import (
     AdminUsersResponse,
     AgentRunActionItemResponse,
     AgentRunActionsResponse,
+    AgentRunResultResponse,
     AgentRunStatusResponse,
     AdminUserUpdateRequest,
     DocumentReprocessStartResponse,
@@ -111,6 +119,7 @@ class OperationsService:
         self.rbac_service = RBACService()
         self.auth_service = AuthService()
         self.document_agent = DocumentAgent(agent_run_service=self.agent_run_service)
+        self.trust_agent = TrustAgent(agent_run_service=self.agent_run_service)
         self.document_storage = DocumentStorageService()
         self.work_state_projector = WorkStateProjector(session_factory=self.session_factory)
 
@@ -362,12 +371,36 @@ class OperationsService:
                 self.work_state_projector.refresh_student_projection(session, tenant_id=tenant_id, student_id=previous_student_id)
             self.work_state_projector.refresh_student_projection(session, tenant_id=tenant_id, student_id=student.id)
             session.commit()
+            self.trust_agent.record_action(
+                context=AgentExecutionContext(
+                    tenant_id=tenant_id,
+                    student_id=student.id,
+                    transcript_id=transcript.id,
+                    actor_user_id=actor_user_id,
+                    correlation_id=f"trust-match-confirm:{document.id}",
+                ),
+                payload=TrustAgentInput(
+                    action="confirm_match",
+                    document_id=str(document.id),
+                    transcript_id=str(transcript.id),
+                    student_id=(str(previous_student_id) if previous_student_id is not None else None),
+                    target_student_id=str(student.id),
+                    reason="Document matched to student by reviewer.",
+                ),
+                trigger_event="manual_match_confirm",
+                action_type="confirm_document_match",
+                tool_name="confirm_document_match",
+                code="document_match_confirmed",
+                message="Document match confirmed.",
+                owner_student_id=student.id,
+                state_json={"last_trust_action": "confirm_match", "documentId": str(document.id)},
+            )
             return ActionResponse(status="confirmed", detail="Document matched to student.")
 
     def reject_document_match(self, tenant_id: UUID, document_id: str, actor_user_id: UUID | None) -> ActionResponse:
         session_factory = self.session_factory()
         with session_factory() as session:
-            _, transcript = self._resolve_document(session, tenant_id, document_id)
+            document, transcript = self._resolve_document(session, tenant_id, document_id)
             previous_student_id = transcript.student_id
             for match in session.execute(
                 select(TranscriptStudentMatch)
@@ -395,6 +428,29 @@ class OperationsService:
             if previous_student_id is not None:
                 self.work_state_projector.refresh_student_projection(session, tenant_id=tenant_id, student_id=previous_student_id)
             session.commit()
+            self.trust_agent.record_action(
+                context=AgentExecutionContext(
+                    tenant_id=tenant_id,
+                    student_id=previous_student_id,
+                    transcript_id=transcript.id,
+                    actor_user_id=actor_user_id,
+                    correlation_id=f"trust-match-reject:{document.id}",
+                ),
+                payload=TrustAgentInput(
+                    action="reject_match",
+                    document_id=str(document.id),
+                    transcript_id=str(transcript.id),
+                    student_id=(str(previous_student_id) if previous_student_id is not None else None),
+                    reason="Document match rejected by reviewer.",
+                ),
+                trigger_event="manual_match_reject",
+                action_type="reject_document_match",
+                tool_name="reject_document_match",
+                code="document_match_rejected",
+                message="Document match rejected.",
+                owner_student_id=previous_student_id,
+                state_json={"last_trust_action": "reject_match", "documentId": str(document.id)},
+            )
             return ActionResponse(status="rejected", detail="Document match rejected.")
 
     def reprocess_document(self, tenant_id: UUID, document_id: str) -> ActionResponse:
@@ -702,6 +758,7 @@ class OperationsService:
                 error=run.error_message,
                 startedAt=self._iso(run.started_at),
                 completedAt=self._iso(run.completed_at),
+                result=self._build_agent_run_result(run.output_json),
             )
 
     def get_agent_run_actions(self, tenant_id: UUID, run_id: str) -> AgentRunActionsResponse | None:
@@ -728,6 +785,7 @@ class OperationsService:
                         error=action.error_message,
                         startedAt=self._iso(action.started_at),
                         completedAt=self._iso(action.completed_at),
+                        result=self._build_agent_run_result(action.output_json),
                         input=action.input_json or {},
                         output=action.output_json or {},
                     )
@@ -735,7 +793,7 @@ class OperationsService:
                 ],
             )
 
-    def get_document_exception_summary(self, tenant_id: UUID, document_id: str) -> DocumentExceptionSummaryResponse | None:
+    def get_document_agent_run_details(self, tenant_id: UUID, document_id: str) -> DocumentAgentRunDetailsResponse | None:
         session_factory = self.session_factory()
         with session_factory() as session:
             try:
@@ -748,63 +806,122 @@ class OperationsService:
                 tenant_id=tenant_id,
                 transcript_id=transcript.id,
             )
-            actions = []
-            if latest_run is not None:
-                actions = self.agent_run_service.list_actions(session, tenant_id=tenant_id, run_id=latest_run.id)[-5:]
             latest_failure = session.execute(
                 select(TranscriptProcessingFailure)
                 .where(
                     TranscriptProcessingFailure.tenant_id == tenant_id,
-                    TranscriptProcessingFailure.document_upload_id == document.id,
+                    TranscriptProcessingFailure.transcript_id == transcript.id,
                 )
                 .order_by(TranscriptProcessingFailure.created_at.desc())
                 .limit(1)
             ).scalar_one_or_none()
-            issue_type = "processing_failure" if latest_failure is not None else "agent_run"
-            issue_label = latest_failure.failure_message if latest_failure is not None else (latest_run.error_message if latest_run and latest_run.error_message else "Document requires review")
-            issue_status = latest_failure.failure_code if latest_failure is not None else (latest_run.status if latest_run is not None else transcript.status)
-            suggested_action = "Retry document processing with the same file." if latest_failure is not None else "Review the latest agent run details."
-            updated_at = transcript.updated_at or document.updated_at
-            return DocumentExceptionSummaryResponse(
+            actions: list[AgentRunActionItemResponse] = []
+            run_response: AgentRunStatusResponse | None = None
+            if latest_run is not None:
+                run_response = AgentRunStatusResponse(
+                    runId=str(latest_run.id),
+                    agentName=latest_run.agent_name,
+                    agentType=latest_run.agent_type,
+                    status=latest_run.status,
+                    triggerEvent=latest_run.trigger_event,
+                    studentId=str(latest_run.student_id) if latest_run.student_id else None,
+                    transcriptId=str(latest_run.transcript_id) if latest_run.transcript_id else None,
+                    actorUserId=str(latest_run.actor_user_id) if latest_run.actor_user_id else None,
+                    correlationId=latest_run.correlation_id,
+                    error=latest_run.error_message,
+                    startedAt=self._iso(latest_run.started_at),
+                    completedAt=self._iso(latest_run.completed_at),
+                    result=self._build_agent_run_result(latest_run.output_json),
+                )
+                actions = self.get_agent_run_actions(tenant_id, str(latest_run.id)).items
+            return DocumentAgentRunDetailsResponse(
                 documentId=str(document.id),
                 transcriptId=str(transcript.id),
-                studentId=self._student_identifier(student) if student else None,
-                studentName=self._student_name(student) if student else None,
+                studentId=(str(student.id) if student is not None else None),
+                studentName=self._student_name(student, None) if student is not None else None,
                 documentStatus=document.upload_status,
                 transcriptStatus=transcript.status,
                 parserConfidence=self._to_float(transcript.parser_confidence, None),
+                latestFailure=(
+                    DocumentAgentRunFailureResponse(
+                        code=latest_failure.failure_code,
+                        message=latest_failure.failure_message,
+                        createdAt=self._iso(latest_failure.created_at),
+                        updatedAt=self._iso(latest_failure.created_at),
+                    )
+                    if latest_failure is not None
+                    else None
+                ),
+                run=run_response,
+                actions=actions,
+            )
+
+    def get_document_exception_summary(self, tenant_id: UUID, document_id: str) -> DocumentExceptionSummaryResponse | None:
+        details = self.get_document_agent_run_details(tenant_id, document_id)
+        if details is None:
+            return None
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            try:
+                document, transcript = self._resolve_document(session, tenant_id, document_id)
+            except Exception:
+                return None
+            latest_failure = details.latestFailure
+            latest_run = details.run
+            actions = details.actions[-5:]
+            issue_type = "processing_failure" if latest_failure is not None else "agent_run"
+            issue_label = (
+                latest_failure.message
+                if latest_failure is not None and latest_failure.message
+                else (latest_run.error if latest_run and latest_run.error else "Document requires review")
+            )
+            issue_status = (
+                latest_failure.code
+                if latest_failure is not None and latest_failure.code
+                else (latest_run.result.code if latest_run and latest_run.result is not None else (latest_run.status if latest_run is not None else transcript.status))
+            )
+            suggested_action = "Retry document processing with the same file." if latest_failure is not None else "Review the latest agent run details."
+            updated_at = transcript.updated_at or document.updated_at
+            return DocumentExceptionSummaryResponse(
+                documentId=details.documentId,
+                transcriptId=details.transcriptId,
+                studentId=details.studentId,
+                studentName=details.studentName,
+                documentStatus=details.documentStatus,
+                transcriptStatus=details.transcriptStatus,
+                parserConfidence=details.parserConfidence,
                 issueType=issue_type,
-                issueLabel=issue_label,
+                issueLabel=issue_label or "Document requires review",
                 issueStatus=issue_status or "unknown",
                 suggestedAction=suggested_action,
-                failureCode=latest_failure.failure_code if latest_failure is not None else None,
-                failureMessage=latest_failure.failure_message if latest_failure is not None else (latest_run.error_message if latest_run is not None else None),
+                failureCode=latest_failure.code if latest_failure is not None else None,
+                failureMessage=latest_failure.message if latest_failure is not None else (latest_run.error if latest_run is not None else None),
                 createdAt=self._iso(document.created_at),
                 updatedAt=self._iso(updated_at),
                 latestRun=(
                     DocumentExceptionSummaryRun(
-                        runId=str(latest_run.id),
-                        agentName=latest_run.agent_name,
+                        runId=latest_run.runId,
+                        agentName=latest_run.agentName,
                         status=latest_run.status,
-                        triggerEvent=latest_run.trigger_event,
-                        error=latest_run.error_message,
-                        startedAt=self._iso(latest_run.started_at),
-                        completedAt=self._iso(latest_run.completed_at),
+                        triggerEvent=latest_run.triggerEvent,
+                        error=latest_run.error,
+                        startedAt=latest_run.startedAt,
+                        completedAt=latest_run.completedAt,
                     )
                     if latest_run is not None
                     else None
                 ),
                 recentActions=[
                     DocumentExceptionSummaryAction(
-                        actionId=str(action.id),
-                        actionType=action.action_type,
-                        toolName=action.tool_name,
+                        actionId=action.actionId,
+                        actionType=action.actionType,
+                        toolName=action.toolName,
                         status=action.status,
-                        error=action.error_message,
-                        startedAt=self._iso(action.started_at),
-                        completedAt=self._iso(action.completed_at),
-                        input=action.input_json or {},
-                        output=action.output_json or {},
+                        error=action.error,
+                        startedAt=action.startedAt,
+                        completedAt=action.completedAt,
+                        input=action.input or {},
+                        output=action.output or {},
                     )
                     for action in actions
                 ],
@@ -821,7 +938,7 @@ class OperationsService:
     def quarantine_document(self, tenant_id: UUID, document_id: str, actor_user_id: UUID | None) -> ActionResponse:
         session_factory = self.session_factory()
         with session_factory() as session:
-            _, transcript = self._resolve_document(session, tenant_id, document_id)
+            document, transcript = self._resolve_document(session, tenant_id, document_id)
             transcript.is_fraudulent = True
             session.add(
                 TrustFlag(
@@ -841,12 +958,35 @@ class OperationsService:
             )
             self.work_state_projector.refresh_transcript_projection(session, tenant_id=tenant_id, student_id=transcript.student_id)
             session.commit()
+            self.trust_agent.record_action(
+                context=AgentExecutionContext(
+                    tenant_id=tenant_id,
+                    student_id=transcript.student_id,
+                    transcript_id=transcript.id,
+                    actor_user_id=actor_user_id,
+                    correlation_id=f"trust-quarantine:{document.id}",
+                ),
+                payload=TrustAgentInput(
+                    action="quarantine_document",
+                    document_id=str(document.id),
+                    transcript_id=str(transcript.id),
+                    student_id=(str(transcript.student_id) if transcript.student_id is not None else None),
+                    reason="Document quarantined by reviewer.",
+                ),
+                trigger_event="manual_quarantine",
+                action_type="quarantine_document",
+                tool_name="quarantine_document",
+                code="trust_document_quarantined",
+                message="Document quarantined.",
+                owner_student_id=transcript.student_id,
+                state_json={"last_trust_action": "quarantine_document", "documentId": str(document.id)},
+            )
             return ActionResponse(status="quarantined", detail="Document quarantined.")
 
     def release_document(self, tenant_id: UUID, document_id: str, actor_user_id: UUID | None) -> ActionResponse:
         session_factory = self.session_factory()
         with session_factory() as session:
-            _, transcript = self._resolve_document(session, tenant_id, document_id)
+            document, transcript = self._resolve_document(session, tenant_id, document_id)
             transcript.is_fraudulent = False
             for flag in session.execute(
                 select(TrustFlag)
@@ -858,6 +998,29 @@ class OperationsService:
                 flag.resolution_notes = "Released by reviewer."
             self.work_state_projector.refresh_transcript_projection(session, tenant_id=tenant_id, student_id=transcript.student_id)
             session.commit()
+            self.trust_agent.record_action(
+                context=AgentExecutionContext(
+                    tenant_id=tenant_id,
+                    student_id=transcript.student_id,
+                    transcript_id=transcript.id,
+                    actor_user_id=actor_user_id,
+                    correlation_id=f"trust-release:{document.id}",
+                ),
+                payload=TrustAgentInput(
+                    action="release_document",
+                    document_id=str(document.id),
+                    transcript_id=str(transcript.id),
+                    student_id=(str(transcript.student_id) if transcript.student_id is not None else None),
+                    reason="Document released by reviewer.",
+                ),
+                trigger_event="manual_release",
+                action_type="release_document",
+                tool_name="release_document",
+                code="trust_document_released",
+                message="Document released.",
+                owner_student_id=transcript.student_id,
+                state_json={"last_trust_action": "release_document", "documentId": str(document.id)},
+            )
             return ActionResponse(status="released", detail="Document released.")
 
     def list_yield(self, tenant_id: UUID, *, view: str | None = None, q: str | None = None) -> YieldQueueResponse:
@@ -1701,6 +1864,21 @@ class OperationsService:
         if upload.upload_status != "indexed":
             return "received_not_indexed"
         return "indexed"
+
+    def _build_agent_run_result(self, payload: dict | None) -> AgentRunResultResponse | None:
+        if not isinstance(payload, dict):
+            return None
+        required_keys = {"status", "code", "message"}
+        if not required_keys.issubset(payload.keys()):
+            return None
+        return AgentRunResultResponse(
+            status=str(payload.get("status")),
+            code=str(payload.get("code")),
+            message=str(payload.get("message")),
+            error=(str(payload.get("error")) if payload.get("error") is not None else None),
+            metrics=(payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}),
+            artifacts=(payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}),
+        )
 
     def _matches_incomplete_view(self, item: IncompleteQueueItem, view: str | None) -> bool:
         if not view:

@@ -1,5 +1,7 @@
 from pydantic import BaseModel
 
+from app.models.operations_models import AgentRunActionItemResponse, AgentRunStatusResponse
+
 
 class DecisionWorkbenchItem(BaseModel):
     id: str
@@ -44,6 +46,8 @@ class DecisionRecommendation(BaseModel):
     fit: int
     creditEstimate: int
     reason: str
+    confidence: int | None = None
+    rationale: list[str] | None = None
 
 
 class DecisionEvidence(BaseModel):
@@ -98,6 +102,55 @@ class DecisionDetailResponse(BaseModel):
     trust: DecisionTrustSummary
     notes: list[DecisionNoteItem]
     timelinePreview: list[DecisionTimelineEvent]
+
+
+class DecisionRecommendationRunResponse(BaseModel):
+    decisionId: str
+    agentRunId: str | None = None
+    recommendation: DecisionRecommendation
+    status: str
+
+
+class DecisionReviewRequest(BaseModel):
+    action: str
+    note: str | None = None
+
+
+class DecisionReviewResponse(BaseModel):
+    id: str
+    action: str
+    status: str
+    snapshotVersion: str
+    updatedAt: str
+
+
+class DecisionReviewedSnapshot(BaseModel):
+    action: str
+    snapshotVersion: str
+    reviewedAt: str
+    reviewedByUserId: str | None = None
+    snapshot: dict
+
+
+class DecisionAgentDetailsResponse(BaseModel):
+    decisionId: str
+    student: DecisionStudentSummary
+    program: DecisionProgramSummary
+    recommendation: DecisionRecommendation
+    latestRun: AgentRunStatusResponse | None = None
+    actions: list[AgentRunActionItemResponse]
+    lastReviewedSnapshot: DecisionReviewedSnapshot | None = None
+
+
+class DecisionSnapshotResponse(BaseModel):
+    decisionId: str
+    status: str
+    readiness: str
+    student: DecisionStudentSummary
+    program: DecisionProgramSummary
+    recommendation: DecisionRecommendation
+    evidence: DecisionEvidence
+    trust: DecisionTrustSummary
 
 
 class DecisionStatusUpdateRequest(BaseModel):

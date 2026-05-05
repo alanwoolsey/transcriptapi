@@ -2,12 +2,18 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+import hashlib
+import json
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agents.base import AgentExecutionContext
+from app.agents.decision_agent import DecisionAgent, DecisionAgentInput
 from app.db.models import (
+    AgentRun,
+    AuditEvent,
     AppUser,
     DecisionPacket,
     DecisionPacketEvent,
@@ -24,6 +30,7 @@ from app.db.models import (
 from app.db.session import get_session_factory
 from app.models.decision_models import (
     CreateDecisionRequest,
+    DecisionAgentDetailsResponse,
     DecisionAssignRequest,
     DecisionAssignResponse,
     DecisionAssignedUser,
@@ -32,6 +39,11 @@ from app.models.decision_models import (
     DecisionNoteCreateRequest,
     DecisionNoteItem,
     DecisionProgramSummary,
+    DecisionReviewRequest,
+    DecisionReviewResponse,
+    DecisionReviewedSnapshot,
+    DecisionSnapshotResponse,
+    DecisionRecommendationRunResponse,
     DecisionRecommendation,
     DecisionStatusUpdateRequest,
     DecisionStatusUpdateResponse,
@@ -41,6 +53,8 @@ from app.models.decision_models import (
     DecisionTrustSummary,
     DecisionWorkbenchItem,
 )
+from app.models.operations_models import AgentRunActionItemResponse, AgentRunResultResponse, AgentRunStatusResponse
+from app.services.agent_run_service import AgentRunService
 from app.services.student_resolution import StudentResolutionService
 
 
@@ -50,6 +64,10 @@ VALID_DECISION_STATUSES = {
     "Needs evidence",
     "Approved",
     "Released",
+}
+VALID_DECISION_REVIEW_ACTIONS = {
+    "accept_recommendation",
+    "request_evidence",
 }
 DEFAULT_QUEUE_NAME = "Admissions Review"
 
@@ -76,6 +94,8 @@ class DecisionService:
     def __init__(self, session_factory=None) -> None:
         self.session_factory = session_factory or get_session_factory
         self.student_resolution = StudentResolutionService()
+        self.agent_run_service = AgentRunService(session_factory=self.session_factory)
+        self.decision_agent = DecisionAgent(agent_run_service=self.agent_run_service)
 
     def list_decisions(self, tenant_id: UUID) -> list[DecisionWorkbenchItem]:
         session_factory = self.session_factory()
@@ -270,6 +290,247 @@ class DecisionService:
                 return []
             return self._load_timeline(session, tenant_id, packet.id)
 
+    def generate_recommendation(
+        self,
+        db: Session,
+        tenant_id: UUID,
+        actor_user_id: UUID,
+        decision_id: UUID,
+    ) -> DecisionRecommendationRunResponse:
+        packet = self._get_or_create_packet(db, tenant_id, actor_user_id, decision_id)
+        snapshot = self._build_snapshot_from_packet(db, packet)
+        recommendation = self._build_recommendation(
+            fit=packet.fit_score,
+            credit_estimate=packet.credit_estimate,
+            reason=packet.reason,
+            readiness=packet.readiness,
+            evidence=snapshot.evidence,
+            trust=snapshot.trust,
+        )
+        result = self.decision_agent.record_recommendation(
+            context=AgentExecutionContext(
+                tenant_id=tenant_id,
+                student_id=packet.student_id,
+                transcript_id=packet.transcript_id,
+                actor_user_id=actor_user_id,
+                correlation_id=f"decision-recommend:{packet.id}",
+            ),
+            payload=DecisionAgentInput(
+                decision_id=str(packet.id),
+                student_id=(str(packet.student_id) if packet.student_id is not None else None),
+                transcript_id=(str(packet.transcript_id) if packet.transcript_id is not None else None),
+                status=packet.status,
+                readiness=packet.readiness,
+                readiness_reason=packet.reason,
+                fit=packet.fit_score,
+                credit_estimate=packet.credit_estimate,
+                trust_status=snapshot.trust.status,
+                trust_signal_count=len(snapshot.trust.signals),
+                active_trust_signal_count=len([signal for signal in snapshot.trust.signals if signal.status.lower() not in {"resolved", "closed"}]),
+                institution=snapshot.evidence.institution,
+                gpa=snapshot.evidence.gpa,
+                credits_earned=snapshot.evidence.creditsEarned,
+                parser_confidence=snapshot.evidence.parserConfidence,
+                document_count=snapshot.evidence.documentCount,
+                reason=packet.reason,
+                confidence=recommendation.confidence,
+                rationale=recommendation.rationale,
+            ),
+            owner_student_id=packet.student_id,
+        )
+        return DecisionRecommendationRunResponse(
+            decisionId=str(packet.id),
+            agentRunId=result.payload.get("runId"),
+            recommendation=recommendation,
+            status="completed",
+        )
+
+    def get_snapshot(self, tenant_id: UUID, decision_id: UUID) -> DecisionSnapshotResponse:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            packet = self._get_packet(session, tenant_id, decision_id)
+            if packet is not None:
+                return self._build_snapshot_from_packet(session, packet)
+
+            bundle = self._load_bundle_by_transcript_id(session, tenant_id, decision_id)
+            if bundle is None:
+                raise DecisionNotFoundError("Decision packet not found.")
+            return self._build_snapshot_from_bundle(bundle, session)
+
+    def get_agent_details(self, tenant_id: UUID, decision_id: UUID) -> DecisionAgentDetailsResponse:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            packet = self._get_packet(session, tenant_id, decision_id)
+            if packet is None:
+                bundle = self._load_bundle_by_transcript_id(session, tenant_id, decision_id)
+                if bundle is None:
+                    raise DecisionNotFoundError("Decision packet not found.")
+                decision_key = bundle.transcript.id
+                student_summary = self._build_student_summary(bundle.student, self._student_name(bundle))
+                program_summary = DecisionProgramSummary(name=self._program_name(bundle))
+                evidence = self._build_evidence(bundle)
+                trust = self._build_trust_summary(session, bundle.transcript.tenant_id, bundle.transcript.id, bundle.transcript.student_id)
+                recommendation = self._build_recommendation(
+                    fit=self._fit_score(bundle),
+                    credit_estimate=self._credit_estimate(bundle),
+                    reason=self._reason(bundle),
+                    readiness=self._readiness(bundle),
+                    evidence=evidence,
+                    trust=trust,
+                )
+                transcript_id = bundle.transcript.id
+                student_id = bundle.transcript.student_id
+            else:
+                bundle = self._load_bundle_by_transcript_id(session, tenant_id, packet.transcript_id) if packet.transcript_id else None
+                decision_key = packet.id
+                student_summary = self._build_student_summary(bundle.student if bundle else None, packet.student_name)
+                program_summary = DecisionProgramSummary(name=packet.program_name)
+                evidence = self._build_evidence(bundle)
+                trust = self._build_trust_summary(session, packet.tenant_id, packet.transcript_id, packet.student_id)
+                recommendation = self._build_recommendation(
+                    fit=packet.fit_score,
+                    credit_estimate=packet.credit_estimate,
+                    reason=packet.reason,
+                    readiness=packet.readiness,
+                    evidence=evidence,
+                    trust=trust,
+                )
+                transcript_id = packet.transcript_id
+                student_id = packet.student_id
+
+            latest_run = self._latest_decision_agent_run(
+                session,
+                tenant_id=tenant_id,
+                transcript_id=transcript_id,
+                student_id=student_id,
+            )
+            latest_run_response = None
+            actions: list[AgentRunActionItemResponse] = []
+            if latest_run is not None:
+                latest_run_response = AgentRunStatusResponse(
+                    runId=str(latest_run.id),
+                    agentName=latest_run.agent_name,
+                    agentType=latest_run.agent_type,
+                    status=latest_run.status,
+                    triggerEvent=latest_run.trigger_event,
+                    studentId=(str(latest_run.student_id) if latest_run.student_id is not None else None),
+                    transcriptId=(str(latest_run.transcript_id) if latest_run.transcript_id is not None else None),
+                    actorUserId=(str(latest_run.actor_user_id) if latest_run.actor_user_id is not None else None),
+                    correlationId=latest_run.correlation_id,
+                    error=latest_run.error_message,
+                    startedAt=self._isoformat(latest_run.started_at),
+                    completedAt=self._isoformat(latest_run.completed_at),
+                    result=self._build_agent_run_result(latest_run.output_json),
+                )
+                actions = [
+                    AgentRunActionItemResponse(
+                        actionId=str(action.id),
+                        actionType=action.action_type,
+                        toolName=action.tool_name,
+                        status=action.status,
+                        studentId=(str(action.student_id) if action.student_id is not None else None),
+                        transcriptId=(str(action.transcript_id) if action.transcript_id is not None else None),
+                        error=action.error_message,
+                        startedAt=self._isoformat(action.started_at),
+                        completedAt=self._isoformat(action.completed_at),
+                        result=self._build_agent_run_result(action.output_json),
+                        input=action.input_json or {},
+                        output=action.output_json or {},
+                    )
+                    for action in self.agent_run_service.list_actions(session, tenant_id=tenant_id, run_id=latest_run.id)
+                ]
+            last_reviewed_snapshot = self._latest_reviewed_snapshot(session, tenant_id=tenant_id, decision_id=decision_key)
+            return DecisionAgentDetailsResponse(
+                decisionId=str(decision_key),
+                student=student_summary,
+                program=program_summary,
+                recommendation=recommendation,
+                latestRun=latest_run_response,
+                actions=actions,
+                lastReviewedSnapshot=last_reviewed_snapshot,
+            )
+
+    def review_recommendation(
+        self,
+        db: Session,
+        tenant_id: UUID,
+        actor_user_id: UUID,
+        decision_id: UUID,
+        payload: DecisionReviewRequest,
+    ) -> DecisionReviewResponse:
+        action = payload.action.strip().lower()
+        if action not in VALID_DECISION_REVIEW_ACTIONS:
+            raise DecisionValidationError("Invalid decision review action.")
+
+        packet = self._get_or_create_packet(db, tenant_id, actor_user_id, decision_id)
+        snapshot = self._build_snapshot_from_packet(db, packet)
+        snapshot_payload = self._snapshot_payload(snapshot)
+        snapshot_version = self._snapshot_version(snapshot_payload)
+        previous_status = packet.status
+
+        if action == "accept_recommendation":
+            packet.status = "Approved"
+            packet.readiness = "Approved"
+            label = "Recommendation accepted"
+            detail = "Decision recommendation accepted and packet moved to Approved."
+        else:
+            packet.status = "Needs evidence"
+            packet.readiness = "Needs evidence"
+            label = "Additional evidence requested"
+            detail = "Decision recommendation sent back for additional evidence."
+
+        note = (payload.note or "").strip()
+        if note:
+            detail = f"{detail} Note: {note}"
+            db.add(
+                DecisionPacketNote(
+                    tenant_id=tenant_id,
+                    decision_packet_id=packet.id,
+                    author_user_id=actor_user_id,
+                    body=note,
+                )
+            )
+
+        self._add_event(
+            db,
+            tenant_id=tenant_id,
+            decision_packet_id=packet.id,
+            actor_user_id=actor_user_id,
+            event_type="recommendation_reviewed",
+            label=label,
+            detail=f"Status changed from {previous_status} to {packet.status}. {detail}",
+        )
+        db.add(
+            AuditEvent(
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                entity_type="decision_packet",
+                entity_id=packet.id,
+                category="Decision",
+                action="recommendation_reviewed",
+                success=True,
+                error_message=None,
+                payload_json={
+                    "decision_id": str(packet.id),
+                    "review_action": action,
+                    "snapshot_version": snapshot_version,
+                    "snapshot": snapshot_payload,
+                },
+                correlation_id=f"decision-review:{packet.id}",
+                source="DecisionService",
+                occurred_at=datetime.now(timezone.utc),
+            )
+        )
+        db.commit()
+        db.refresh(packet)
+        return DecisionReviewResponse(
+            id=str(packet.id),
+            action=action,
+            status=packet.status,
+            snapshotVersion=snapshot_version,
+            updatedAt=self._isoformat(packet.updated_at),
+        )
+
     def _load_list_bundles(self, session: Session, tenant_id: UUID) -> list[_DecisionBundle]:
         transcript_stmt = (
             select(Transcript, TranscriptDemographics, Student)
@@ -455,10 +716,13 @@ class DecisionService:
             updatedAt=self._isoformat(packet.updated_at),
             student=self._build_student_summary(student, packet.student_name),
             program=DecisionProgramSummary(name=packet.program_name),
-            recommendation=DecisionRecommendation(
+            recommendation=self._build_recommendation(
                 fit=packet.fit_score,
-                creditEstimate=packet.credit_estimate,
+                credit_estimate=packet.credit_estimate,
                 reason=packet.reason,
+                readiness=packet.readiness,
+                evidence=evidence,
+                trust=trust,
             ),
             evidence=evidence,
             trust=trust,
@@ -468,6 +732,7 @@ class DecisionService:
 
     def _build_detail_from_bundle(self, session: Session, bundle: _DecisionBundle) -> DecisionDetailResponse:
         trust = self._build_trust_summary(session, bundle.transcript.tenant_id, bundle.transcript.id, bundle.transcript.student_id)
+        evidence = self._build_evidence(bundle)
         return DecisionDetailResponse(
             id=str(bundle.transcript.id),
             status="Draft",
@@ -478,16 +743,172 @@ class DecisionService:
             updatedAt=self._isoformat(bundle.transcript.updated_at or bundle.transcript.created_at),
             student=self._build_student_summary(bundle.student, self._student_name(bundle)),
             program=DecisionProgramSummary(name=self._program_name(bundle)),
-            recommendation=DecisionRecommendation(
+            recommendation=self._build_recommendation(
                 fit=self._fit_score(bundle),
-                creditEstimate=self._credit_estimate(bundle),
+                credit_estimate=self._credit_estimate(bundle),
                 reason=self._reason(bundle),
+                readiness=self._readiness(bundle),
+                evidence=evidence,
+                trust=trust,
             ),
-            evidence=self._build_evidence(bundle),
+            evidence=evidence,
             trust=trust,
             notes=[],
             timelinePreview=[],
         )
+
+    def _build_snapshot_from_packet(self, session: Session, packet: DecisionPacket) -> DecisionSnapshotResponse:
+        bundle = self._load_bundle_by_transcript_id(session, packet.tenant_id, packet.transcript_id) if packet.transcript_id else None
+        student = bundle.student if bundle else (session.get(Student, packet.student_id) if packet.student_id else None)
+        evidence = self._build_evidence(bundle)
+        trust = self._build_trust_summary(session, packet.tenant_id, packet.transcript_id, packet.student_id)
+        return DecisionSnapshotResponse(
+            decisionId=str(packet.id),
+            status=packet.status,
+            readiness=packet.readiness,
+            student=self._build_student_summary(student, packet.student_name),
+            program=DecisionProgramSummary(name=packet.program_name),
+            recommendation=self._build_recommendation(
+                fit=packet.fit_score,
+                credit_estimate=packet.credit_estimate,
+                reason=packet.reason,
+                readiness=packet.readiness,
+                evidence=evidence,
+                trust=trust,
+            ),
+            evidence=evidence,
+            trust=trust,
+        )
+
+    def _build_snapshot_from_bundle(self, bundle: _DecisionBundle, session: Session) -> DecisionSnapshotResponse:
+        evidence = self._build_evidence(bundle)
+        trust = self._build_trust_summary(session, bundle.transcript.tenant_id, bundle.transcript.id, bundle.transcript.student_id)
+        return DecisionSnapshotResponse(
+            decisionId=str(bundle.transcript.id),
+            status="Draft",
+            readiness=self._readiness(bundle),
+            student=self._build_student_summary(bundle.student, self._student_name(bundle)),
+            program=DecisionProgramSummary(name=self._program_name(bundle)),
+            recommendation=self._build_recommendation(
+                fit=self._fit_score(bundle),
+                credit_estimate=self._credit_estimate(bundle),
+                reason=self._reason(bundle),
+                readiness=self._readiness(bundle),
+                evidence=evidence,
+                trust=trust,
+            ),
+            evidence=evidence,
+            trust=trust,
+        )
+
+    def _latest_reviewed_snapshot(
+        self,
+        session: Session,
+        *,
+        tenant_id: UUID,
+        decision_id: UUID,
+    ) -> DecisionReviewedSnapshot | None:
+        audit = session.execute(
+            select(AuditEvent)
+            .where(
+                AuditEvent.tenant_id == tenant_id,
+                AuditEvent.entity_type == "decision_packet",
+                AuditEvent.entity_id == decision_id,
+                AuditEvent.action == "recommendation_reviewed",
+            )
+            .order_by(AuditEvent.occurred_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if audit is None or not isinstance(audit.payload_json, dict):
+            return None
+
+        payload = audit.payload_json
+        snapshot = payload.get("snapshot")
+        snapshot_version = payload.get("snapshot_version")
+        review_action = payload.get("review_action")
+        if not isinstance(snapshot, dict) or not isinstance(snapshot_version, str) or not isinstance(review_action, str):
+            return None
+
+        return DecisionReviewedSnapshot(
+            action=review_action,
+            snapshotVersion=snapshot_version,
+            reviewedAt=self._isoformat(audit.occurred_at),
+            reviewedByUserId=(str(audit.actor_user_id) if audit.actor_user_id is not None else None),
+            snapshot=snapshot,
+        )
+
+    def _snapshot_payload(self, snapshot: DecisionSnapshotResponse) -> dict:
+        return snapshot.model_dump(mode="json")
+
+    def _snapshot_version(self, snapshot_payload: dict) -> str:
+        encoded = json.dumps(snapshot_payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+    def _build_recommendation(
+        self,
+        *,
+        fit: int,
+        credit_estimate: int,
+        reason: str,
+        readiness: str,
+        evidence: DecisionEvidence,
+        trust: DecisionTrustSummary,
+    ) -> DecisionRecommendation:
+        return DecisionRecommendation(
+            fit=fit,
+            creditEstimate=credit_estimate,
+            reason=reason,
+            confidence=self._recommendation_confidence(readiness=readiness, evidence=evidence, trust=trust),
+            rationale=self._recommendation_rationale(reason=reason, readiness=readiness, evidence=evidence, trust=trust),
+        )
+
+    def _recommendation_confidence(
+        self,
+        *,
+        readiness: str,
+        evidence: DecisionEvidence,
+        trust: DecisionTrustSummary,
+    ) -> int:
+        if evidence.parserConfidence is not None:
+            score = int(round(max(0.0, min(1.0, float(evidence.parserConfidence))) * 100))
+        else:
+            score = 72
+
+        readiness_key = readiness.strip().lower()
+        if readiness_key in {"auto-certify", "ready for review", "approved"}:
+            score += 5
+        if readiness_key in {"need evidence", "needs evidence", "trust hold"}:
+            score -= 15
+        if evidence.documentCount <= 0:
+            score -= 10
+        active_signals = [signal for signal in trust.signals if signal.status.lower() not in {"resolved", "closed"}]
+        if trust.status.lower() != "clear":
+            score -= 20
+        score -= min(20, len(active_signals) * 10)
+        return max(0, min(100, score))
+
+    def _recommendation_rationale(
+        self,
+        *,
+        reason: str,
+        readiness: str,
+        evidence: DecisionEvidence,
+        trust: DecisionTrustSummary,
+    ) -> list[str]:
+        rationale = [reason]
+        if evidence.institution:
+            rationale.append(f"Evidence is based on transcript data from {evidence.institution}.")
+        if evidence.parserConfidence is not None:
+            rationale.append(f"Parser confidence is {round(float(evidence.parserConfidence) * 100)}%.")
+        if evidence.documentCount:
+            rationale.append(f"{evidence.documentCount} document record is included in the decision context.")
+        if trust.status.lower() == "clear":
+            rationale.append("No active trust signals are blocking review.")
+        else:
+            rationale.append(f"Trust status is {trust.status}; active signals should be reviewed before release.")
+        if readiness:
+            rationale.append(f"Current readiness is {readiness}.")
+        return rationale
 
     def _build_student_summary(self, student: Student | None, fallback_name: str) -> DecisionStudentSummary:
         if student is None:
@@ -586,6 +1007,41 @@ class DecisionService:
             )
             for event, user in rows
         ]
+
+    def _latest_decision_agent_run(
+        self,
+        session: Session,
+        *,
+        tenant_id: UUID,
+        transcript_id: UUID | None,
+        student_id: UUID | None,
+    ) -> AgentRun | None:
+        stmt = select(AgentRun).where(
+            AgentRun.tenant_id == tenant_id,
+            AgentRun.agent_name == "decision_agent",
+        )
+        if transcript_id is not None:
+            stmt = stmt.where(AgentRun.transcript_id == transcript_id)
+        elif student_id is not None:
+            stmt = stmt.where(AgentRun.student_id == student_id)
+        else:
+            return None
+        return session.execute(stmt.order_by(AgentRun.created_at.desc()).limit(1)).scalar_one_or_none()
+
+    def _build_agent_run_result(self, payload: dict | None) -> AgentRunResultResponse | None:
+        if not isinstance(payload, dict):
+            return None
+        required_keys = {"status", "code", "message"}
+        if not required_keys.issubset(payload.keys()):
+            return None
+        return AgentRunResultResponse(
+            status=str(payload.get("status")),
+            code=str(payload.get("code")),
+            message=str(payload.get("message")),
+            error=(str(payload.get("error")) if payload.get("error") is not None else None),
+            metrics=(payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}),
+            artifacts=(payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}),
+        )
 
     def _add_event(
         self,

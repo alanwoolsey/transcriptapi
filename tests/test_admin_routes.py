@@ -465,6 +465,14 @@ def test_get_agent_run_status_returns_payload(monkeypatch):
             "error": None,
             "startedAt": "2026-05-05T18:11:10Z",
             "completedAt": "2026-05-05T18:11:18Z",
+            "result": {
+                "status": "completed",
+                "code": "transcript_processed",
+                "message": "Transcript parsed successfully.",
+                "error": None,
+                "metrics": {"courses": 31, "use_bedrock": True},
+                "artifacts": {"documentId": "doc-1", "transcriptId": "tx-1"},
+            },
         },
     )
 
@@ -473,6 +481,7 @@ def test_get_agent_run_status_returns_payload(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["status"] == "completed"
+    assert response.json()["result"]["code"] == "transcript_processed"
 
 
 def test_get_agent_run_actions_returns_payload(monkeypatch):
@@ -495,8 +504,23 @@ def test_get_agent_run_actions_returns_payload(monkeypatch):
                     "error": None,
                     "startedAt": "2026-05-05T18:11:10Z",
                     "completedAt": "2026-05-05T18:11:15Z",
+                    "result": {
+                        "status": "completed",
+                        "code": "transcript_parsed",
+                        "message": "Transcript parsing completed.",
+                        "error": None,
+                        "metrics": {"courses": 31, "use_bedrock": True},
+                        "artifacts": {"documentId": "doc-1", "transcriptId": "tx-1"},
+                    },
                     "input": {"filename": "one.pdf"},
-                    "output": {"courses": 31},
+                    "output": {
+                        "status": "completed",
+                        "code": "transcript_parsed",
+                        "message": "Transcript parsing completed.",
+                        "error": None,
+                        "metrics": {"courses": 31, "use_bedrock": True},
+                        "artifacts": {"documentId": "doc-1", "transcriptId": "tx-1"},
+                    },
                 }
             ],
         },
@@ -507,3 +531,4 @@ def test_get_agent_run_actions_returns_payload(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["items"][0]["actionType"] == "parse_transcript"
+    assert response.json()["items"][0]["result"]["code"] == "transcript_parsed"

@@ -610,6 +610,7 @@ class TrustFlag(Base):
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     detected_by: Mapped[str] = mapped_column(Text, nullable=False)
     detected_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    assigned_to_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
     resolved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
     resolved_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     resolution_notes: Mapped[str | None] = mapped_column(Text)
@@ -1055,3 +1056,25 @@ Index("ix_student_work_state_tenant_student", StudentWorkState.tenant_id, Studen
 Index("ix_student_work_state_tenant_section_priority", StudentWorkState.tenant_id, StudentWorkState.section, StudentWorkState.priority)
 Index("ix_student_work_state_tenant_population", StudentWorkState.tenant_id, StudentWorkState.population)
 Index("ix_student_work_state_tenant_projected_desc", StudentWorkState.tenant_id, StudentWorkState.projected_at.desc())
+
+
+class WorkProjectionJob(Base):
+    __tablename__ = "work_projection_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'queued'"))
+    reset_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    chunk_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    processed_students: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    remaining_students: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    next_cursor: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_work_projection_jobs_tenant_created_desc", WorkProjectionJob.tenant_id, WorkProjectionJob.created_at.desc())
+Index("ix_work_projection_jobs_tenant_status", WorkProjectionJob.tenant_id, WorkProjectionJob.status)
