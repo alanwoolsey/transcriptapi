@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     app_env: str = "dev"
     app_host: str = "0.0.0.0"
     app_port: int = 8000
-    cors_allowed_origins: list[str] = []
+    cors_allowed_origins: list[str] = ["*"]
     aws_region: str = "us-east-1"
     aws_profile: str | None = None
     aws_shared_credentials_file: str | None = None
