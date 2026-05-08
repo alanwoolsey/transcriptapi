@@ -29,6 +29,10 @@ class TranscriptHeuristicParser:
         re.compile(r"\bStudent\s+Name[:\-]\s*(.+)$", re.IGNORECASE),
         re.compile(r"\bName[:\-]\s*(.+)$", re.IGNORECASE),
     ]
+    TRANSCRIPT_FOR_NAME_PATTERNS = [
+        re.compile(r"\bTranscript\s+For[:\-]\s*(?P<name>[A-Za-z][A-Za-z'., -]{2,80})$", re.IGNORECASE),
+        re.compile(r"^(?P<name>[A-Za-z][A-Za-z'., -]{2,80}?)\s*Transcript\s+For[:\-]?\b", re.IGNORECASE),
+    ]
     STUDENT_ID_PATTERNS = [
         re.compile(r"\bStudent\s+ID[:\-]\s*([A-Z0-9\-]+)\b", re.IGNORECASE),
         re.compile(r"\bID[:\-]\s*([A-Z0-9\-]+)\b", re.IGNORECASE),
@@ -2181,6 +2185,8 @@ class TranscriptHeuristicParser:
             student["date_of_birth"] = self._line_after(text_lines, "Date of Birth")
         if not student["name"]:
             student["name"] = self._extract_labeled_name_value(text_lines, "Student Name")
+        if not student["name"]:
+            student["name"] = self._extract_transcript_for_name(text_lines)
         if not student["name"] and text_lines:
             first_line = text_lines[0].strip()
             if 2 <= len(first_line.split()) <= 5 and "course name" in first_line.lower():
@@ -2264,6 +2270,20 @@ class TranscriptHeuristicParser:
         if len(parts) != 2:
             return text
         return f"{parts[1]} {parts[0]}".strip()
+
+    def _extract_transcript_for_name(self, text_lines: List[str]) -> str | None:
+        for line in text_lines:
+            compact = re.sub(r"\s+", " ", line).strip()
+            if "transcript for" not in compact.lower():
+                continue
+            for pattern in self.TRANSCRIPT_FOR_NAME_PATTERNS:
+                match = pattern.search(compact)
+                if not match:
+                    continue
+                candidate = match.group("name").strip(" :-")
+                if self._looks_like_person_name(candidate):
+                    return self._normalize_name_value(candidate)
+        return None
 
     def _parse_terms_and_courses(self, text_lines: List[str]) -> List[Dict[str, Any]]:
         current_term = "Unassigned"

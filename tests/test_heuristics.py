@@ -852,6 +852,24 @@ def test_parser_uses_labeled_student_name_from_later_page_block():
     assert parsed["student"]["name"] == "Colten Timothy Booher"
 
 
+def test_parser_extracts_name_before_transcript_for_label():
+    parser = TranscriptHeuristicParser()
+    text = """
+    Davis School District
+    Bountiful High
+    Grade:
+    2021
+    MUELLER PARK JR HIGH
+    TURPIN, PATRICK JEFFREYTranscript For:
+    Class Graduation Date: June 2026
+    Cumulative GPA: 3.740
+    """.strip()
+
+    parsed = parser.parse(text, "high_school_transcript")
+
+    assert parsed["student"]["name"] == "PATRICK JEFFREY TURPIN"
+
+
 def test_parser_handles_student_achievement_summary_transcript_rows():
     parser = TranscriptHeuristicParser()
     text = """
