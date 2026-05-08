@@ -55,6 +55,12 @@ class TranscriptHeuristicParser:
     ]
     COLLEGE_HINTS = ["credits attempted", "credits earned", "term gpa", "semester", "university", "bachelor of", "degrees awarded"]
     INSTITUTION_KEYWORDS = ("university", "college", "school", "academy")
+    DENSE_HIGH_SCHOOL_PREFIXES = (
+        "BOUNTIFUL HIGH SCHOO",
+        "MUELLER PARK JR HIGH",
+        "MEULLER PARK JR HIGH",
+        "DAVIS CONNECT",
+    )
 
     def detect_document_type(self, text: str, requested_document_type: str = "auto") -> str:
         if requested_document_type == "high_school":
@@ -2288,6 +2294,9 @@ class TranscriptHeuristicParser:
     def _parse_terms_and_courses(self, text_lines: List[str]) -> List[Dict[str, Any]]:
         current_term = "Unassigned"
         bucket: dict[str, list[TranscriptCourse]] = defaultdict(list)
+        dense_courses = self._parse_dense_high_school_layout_courses(text_lines)
+        if dense_courses:
+            bucket[current_term].extend(dense_courses)
         idx = 0
 
         while idx < len(text_lines):
@@ -2298,6 +2307,9 @@ class TranscriptHeuristicParser:
                 continue
             if self._looks_like_high_school_year_header(line):
                 current_term = line
+                idx += 1
+                continue
+            if self._looks_like_dense_high_school_layout_row(line):
                 idx += 1
                 continue
 
@@ -2343,6 +2355,64 @@ class TranscriptHeuristicParser:
                     }
                 )
         return terms
+
+    def _parse_dense_high_school_layout_courses(self, text_lines: List[str]) -> List[TranscriptCourse]:
+        courses: list[TranscriptCourse] = []
+        seen: set[tuple[str, str, float]] = set()
+        prefix_pattern = "|".join(re.escape(prefix) for prefix in self.DENSE_HIGH_SCHOOL_PREFIXES)
+        segment_pattern = re.compile(
+            rf"(?:{prefix_pattern})\s*"
+            rf"(?P<title>.+?)\s+"
+            rf"(?P<grade>{self.GRADE_TOKEN_PATTERN})\s+"
+            r"(?P<credits>\.?\d+(?:\.\d+)?)"
+            rf"(?=\s*(?:{prefix_pattern})|$)",
+            re.IGNORECASE,
+        )
+        for line in text_lines:
+            compact = re.sub(r"\s+", " ", (line or "").replace("\n", " ")).strip()
+            if not compact or not any(prefix.lower() in compact.lower() for prefix in self.DENSE_HIGH_SCHOOL_PREFIXES):
+                continue
+            for match in segment_pattern.finditer(compact):
+                title = self._normalize_dense_high_school_title(match.group("title"))
+                grade = match.group("grade").upper()
+                credits = self._normalize_high_school_credit(match.group("credits"))
+                if not title or credits is None:
+                    continue
+                key = (title.lower(), grade, credits)
+                if key in seen:
+                    continue
+                seen.add(key)
+                confidence_score, confidence_reasons = self._estimate_course_confidence(
+                    course_code=None,
+                    course_title=title,
+                    credits=credits,
+                    grade=grade,
+                    term=None,
+                )
+                courses.append(
+                    TranscriptCourse(
+                        course_code=None,
+                        course_title=title,
+                        credits=credits,
+                        grade=grade,
+                        confidence_score=confidence_score,
+                        confidence_reasons=confidence_reasons,
+                    )
+                )
+        return courses
+
+    def _looks_like_dense_high_school_layout_row(self, line: str) -> bool:
+        compact = re.sub(r"\s+", " ", (line or "").replace("\n", " ")).strip().lower()
+        return bool(compact and any(prefix.lower() in compact for prefix in self.DENSE_HIGH_SCHOOL_PREFIXES))
+
+    def _normalize_dense_high_school_title(self, value: str) -> str:
+        title = re.sub(r"\s+", " ", (value or "").strip(" -"))
+        title = re.sub(r"^(?:SCHOO|SCHOOL)\s*", "", title, flags=re.IGNORECASE).strip()
+        if not title or self._should_skip_non_course_line(title):
+            return ""
+        if re.fullmatch(r"[A-Z]{1,3}", title):
+            return ""
+        return title
 
     def _consume_vertical_high_school_course(
         self,
@@ -2533,21 +2603,33 @@ class TranscriptHeuristicParser:
         course_title = match.group("title").strip(" -")
         if not course_title or len(course_title) < 3:
             return None
+        credits = self._normalize_high_school_credit(match.group("credits"))
+        if credits is None:
+            return None
         confidence_score, confidence_reasons = self._estimate_course_confidence(
             course_code=None,
             course_title=course_title,
-            credits=float(match.group("credits")),
+            credits=credits,
             grade=match.group("grade").upper(),
             term=None,
         )
         return TranscriptCourse(
             course_code=None,
             course_title=course_title,
-            credits=float(match.group("credits")),
+            credits=credits,
             grade=match.group("grade").upper(),
             confidence_score=confidence_score,
             confidence_reasons=confidence_reasons,
         )
+
+    def _normalize_high_school_credit(self, value: str) -> float | None:
+        credits = self._safe_float(value)
+        if credits is None:
+            return None
+        compact = (value or "").strip()
+        if credits > 5 and re.fullmatch(r"\d{2,3}", compact):
+            credits = credits / 100
+        return credits
 
     def _looks_like_high_school_year_header(self, line: str) -> bool:
         compact = line.strip()

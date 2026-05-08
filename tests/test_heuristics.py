@@ -870,6 +870,30 @@ def test_parser_extracts_name_before_transcript_for_label():
     assert parsed["student"]["name"] == "PATRICK JEFFREY TURPIN"
 
 
+def test_parser_handles_dense_davis_high_school_layout_rows():
+    parser = TranscriptHeuristicParser()
+    text = """
+    Davis School District
+    Bountiful High
+    TURPIN, PATRICK JEFFREYTranscript For:
+    Cumulative GPA: 3.740
+    BOUNTIFUL HIGH SCHOOHonors English 10 A 25 BOUNTIFUL HIGH SCHOOAP World History A- .25
+    BOUNTIFUL HIGH SCHOO3D Animation A .25 DAVIS CONNECT Health Education 2 A .25
+    """.strip()
+
+    parsed = parser.parse(text, "high_school_transcript")
+    courses = parsed["terms"][0]["courses"]
+
+    assert [course["course_title"] for course in courses] == [
+        "Honors English 10",
+        "AP World History",
+        "3D Animation",
+        "Health Education 2",
+    ]
+    assert courses[0]["credits"] == 0.25
+    assert courses[1]["grade"] == "A-"
+
+
 def test_parser_handles_student_achievement_summary_transcript_rows():
     parser = TranscriptHeuristicParser()
     text = """

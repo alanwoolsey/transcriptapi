@@ -119,8 +119,9 @@ class TranscriptPipeline:
 
         text_assessment = self.heuristic_judge.assess(text)
 
-        document_type = self.parser.detect_document_type(text, requested_document_type=requested_document_type)
-        parsed = self.parser.parse(text, document_type)
+        parse_text = self._augment_text_with_layout_rows(text=text, line_locations=line_locations)
+        document_type = self.parser.detect_document_type(parse_text, requested_document_type=requested_document_type)
+        parsed = self.parser.parse(parse_text, document_type)
         parsed["terms"] = self.parser.ensure_course_confidences(parsed.get("terms", []))
         parsed["course_confidence_summary"] = self.parser.summarize_course_confidence(parsed.get("terms", []))
         heuristic_parsed = deepcopy(parsed)
@@ -206,7 +207,7 @@ class TranscriptPipeline:
             parsed["document_type"],
             len(warnings),
         )
-        return self.response_mapper.map(parsed=parsed, raw_text=text, metadata=metadata)
+        return self.response_mapper.map(parsed=parsed, raw_text=parse_text, metadata=metadata)
 
     def _capture_learning_candidate(
         self,
@@ -272,6 +273,21 @@ class TranscriptPipeline:
             )
         )
         return merged_header_count > 0
+
+    def _augment_text_with_layout_rows(self, text: str, line_locations: list[dict[str, Any]]) -> str:
+        if not line_locations:
+            return text
+        layout_rows: list[str] = []
+        seen: set[str] = set()
+        for line in line_locations:
+            row_text = normalize_whitespace((line.get("text") or "").replace("\n", " "))
+            if not row_text or row_text in seen or row_text in text:
+                continue
+            seen.add(row_text)
+            layout_rows.append(row_text)
+        if not layout_rows:
+            return text
+        return f"{text}\n" + "\n".join(layout_rows)
 
     def _needs_ai(self, text_assessment, parsed: Dict[str, Any], overall_confidence: float, visible_course_rows_estimate: int = 0) -> bool:
         if not text_assessment.acceptable:
