@@ -104,6 +104,18 @@ class MalformedBedrock:
         raise BedrockResponseFormatError("Bedrock returned malformed JSON: Expecting ',' delimiter")
 
 
+class BlankStudentBedrock:
+    def __init__(self):
+        self.calls = 0
+
+    def refine(self, text: str, heuristic_result: dict) -> dict:
+        self.calls += 1
+        refined = dict(heuristic_result)
+        refined["student"] = {"name": None, "student_id": None, "date_of_birth": None}
+        refined["parser_confidence"] = 0.9
+        return refined
+
+
 class FailingTextract:
     def extract(self, content: bytes) -> str:
         raise RuntimeError("UnsupportedDocumentException")
@@ -665,6 +677,32 @@ def test_pipeline_falls_back_to_heuristic_parse_when_bedrock_returns_malformed_j
     assert "Bedrock second pass returned malformed JSON; using heuristic parse." in result["metadata"]["warnings"]
     assert bedrock.calls == 1
     assert len(result["courses"]) == 1
+
+
+def test_pipeline_preserves_heuristic_student_when_bedrock_returns_blank_student(monkeypatch):
+    monkeypatch.setattr(settings, "use_bedrock", True)
+    monkeypatch.setattr(settings, "heuristic_parse_min_confidence", 0.99)
+    bedrock = BlankStudentBedrock()
+    text = """
+    Davis School District
+    Bountiful High
+    TURPIN, PATRICK JEFFREYTranscript For:
+    Cumulative GPA: 3.740
+    BOUNTIFUL HIGH SCHOOHonors English 10 A 25 BOUNTIFUL HIGH SCHOOAP World History A- .25
+    """.strip()
+    pipeline = TranscriptPipeline(
+        local_extractor=DummyLocalExtractor(text),
+        textract_extractor=DummyTextract(),
+        bedrock_mapper=bedrock,
+    )
+
+    result = pipeline.process("turpin.pdf", b"%PDF", "application/pdf", requested_document_type="auto", use_bedrock=True)
+
+    assert bedrock.calls == 1
+    assert result["demographic"]["firstName"] == "PATRICK"
+    assert result["demographic"]["middleName"] == "JEFFREY"
+    assert result["demographic"]["lastName"] == "TURPIN"
+    assert len(result["courses"]) == 2
 
 
 def test_pipeline_uses_ocr_when_pdf_text_is_not_readable():

@@ -242,11 +242,28 @@ class TranscriptPipeline:
 
     def _merge(self, base: Dict[str, Any], refined: Dict[str, Any]) -> Dict[str, Any]:
         merged = dict(base)
-        for key in ["document_type", "student", "institutions", "academic_summary", "terms"]:
+        for key in ["document_type", "institutions", "academic_summary", "terms"]:
             refined_value = refined.get(key)
             if refined_value not in (None, [], {}, ""):
                 merged[key] = refined_value
+        if refined.get("student") not in (None, {}, ""):
+            merged["student"] = self._merge_student(base.get("student", {}), refined.get("student", {}))
         merged["parser_confidence"] = max(base.get("parser_confidence", 0.0), refined.get("parser_confidence", 0.0), 0.85)
+        return merged
+
+    def _merge_student(self, base_student: Dict[str, Any], refined_student: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(base_student or {})
+        for key in ["name", "student_id", "date_of_birth"]:
+            refined_value = (refined_student or {}).get(key)
+            if refined_value not in (None, "", {}, []):
+                merged[key] = refined_value
+        refined_address = (refined_student or {}).get("address")
+        if isinstance(refined_address, dict):
+            base_address = dict(merged.get("address") or {})
+            for key, value in refined_address.items():
+                if value not in (None, "", {}, []):
+                    base_address[key] = value
+            merged["address"] = base_address
         return merged
 
     def _needs_ocr(self, extension: str, assessment) -> bool:
