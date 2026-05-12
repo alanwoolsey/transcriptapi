@@ -64,3 +64,10 @@ def test_failure_code_maps_student_resolution_and_course_mapping():
     assert service._failure_code_from_message("Could not identify student from transcript.") == "student_resolution_failed"
     assert service._failure_code_from_message("No courses were extracted from transcript.") == "course_mapping_failed"
     assert service._failure_code_from_message("Something else broke.") == "processing_failed"
+
+
+def test_parse_date_accepts_transcript_month_name_formats():
+    service = TranscriptPersistenceService(session_factory=lambda: None)
+
+    assert str(service._parse_date("Aug 12, 1992")) == "1992-08-12"
+    assert str(service._parse_date("17-MAR-2008")) == "2008-03-17"

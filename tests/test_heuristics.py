@@ -894,6 +894,46 @@ def test_parser_handles_dense_davis_high_school_layout_rows():
     assert courses[1]["grade"] == "A-"
 
 
+def test_parser_extracts_adult_education_header_student_identity():
+    parser = TranscriptHeuristicParser()
+    text = """
+    Utah Adult Education Official Transcript
+    Horizonte Instruction and Training Center
+    1234 South Main Street Salt Lake City, UT 84101 (801) 578-8574
+    Escobar, Flor
+    5101 Piney Ridge Drive
+    West Valley City, UT 84118
+    SSID:
+    ID:
+    77162
+    Birth Date:
+    Aug 12, 1992
+    Transcript Summary
+    Cumulative Credit: 24.000
+    Cumulative GPA: 2.215
+    2007 - 2008 School Year
+    Grade
+    Site
+    Course Name
+    Credits
+    Course Grade
+    9
+    Kennedy Junior High
+    Algebra 1
+    0.250
+    D-
+    """.strip()
+
+    document_type = parser.detect_document_type(text)
+    parsed = parser.parse(text, document_type)
+
+    assert parsed["document_type"] == "high_school_transcript"
+    assert parsed["student"]["name"] == "Flor Escobar"
+    assert parsed["student"]["student_id"] == "77162"
+    assert parsed["student"]["date_of_birth"] == "Aug 12, 1992"
+    assert parsed["institutions"][0]["name"] == "Horizonte Instruction and Training Center"
+
+
 def test_parser_handles_student_achievement_summary_transcript_rows():
     parser = TranscriptHeuristicParser()
     text = """

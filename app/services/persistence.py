@@ -1003,7 +1003,7 @@ class TranscriptPersistenceService:
         if not value:
             return None
         text = value.strip()
-        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%b %d, %Y", "%d-%b-%Y"):
             try:
                 return datetime.strptime(text, fmt).date()
             except ValueError:

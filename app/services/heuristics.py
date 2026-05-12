@@ -69,6 +69,8 @@ class TranscriptHeuristicParser:
             return "college_transcript"
 
         lowered = text.lower()
+        if "utah adult education official transcript" in lowered:
+            return "high_school_transcript"
         if "milwaukee area technical college" in lowered and "transcript" in lowered:
             return "college_transcript"
         hs_score = sum(1 for hint in self.HS_HINTS if hint in lowered)
@@ -1562,8 +1564,12 @@ class TranscriptHeuristicParser:
         return None
 
     def _extract_top_name(self, text_lines: List[str]) -> str | None:
-        if text_lines and "," in text_lines[0]:
-            return self._normalize_name_value(text_lines[0].strip())
+        for line in text_lines[:20]:
+            candidate = line.strip()
+            if "," not in candidate:
+                continue
+            if self._looks_like_person_name(candidate):
+                return self._normalize_name_value(candidate)
         return None
 
     def _extract_labeled_name_value(self, text_lines: List[str], label: str) -> str | None:
@@ -2187,8 +2193,12 @@ class TranscriptHeuristicParser:
             student["date_of_birth"] = self._extract_after_prefix(text_lines, "Date of Birth")
         if not student["student_id"]:
             student["student_id"] = self._line_after(text_lines, "Student ID")
+        if not student["student_id"]:
+            student["student_id"] = self._line_after(text_lines, "ID:")
         if not student["date_of_birth"]:
             student["date_of_birth"] = self._line_after(text_lines, "Date of Birth")
+        if not student["date_of_birth"]:
+            student["date_of_birth"] = self._line_after(text_lines, "Birth Date:")
         if not student["name"]:
             student["name"] = self._extract_labeled_name_value(text_lines, "Student Name")
         if not student["name"]:
@@ -2674,6 +2684,15 @@ class TranscriptHeuristicParser:
             lowered = line.strip().lower()
             if "madison college unofficial" in lowered or lowered == "madison college":
                 return "Madison College"
+        for idx, line in enumerate(text_lines[:10]):
+            if "utah adult education official transcript" not in line.strip().lower():
+                continue
+            for candidate in text_lines[idx + 1 : min(idx + 5, len(text_lines))]:
+                compact = candidate.strip()
+                if not compact or self._looks_like_courseish_institution_candidate(compact):
+                    continue
+                if re.search(r"\b(center|school|college|university|academy)\b", compact, re.IGNORECASE):
+                    return compact
         if document_type == "high_school_transcript":
             for idx, line in enumerate(text_lines):
                 if line.strip().lower() == "gpa summary":
@@ -2703,6 +2722,8 @@ class TranscriptHeuristicParser:
         if looks_like_grade(compact.split()[-1]):
             return True
         if re.search(r"\b(Attempted|Earned|Grade|Points|Term GPA|Cum GPA|Totals|Course Topic|Repeated:)\b", compact, re.IGNORECASE):
+            return True
+        if re.search(r"\bSchool\s+Year\b", compact, re.IGNORECASE):
             return True
         return False
 
