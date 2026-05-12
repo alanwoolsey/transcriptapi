@@ -117,6 +117,27 @@ class BlankStudentBedrock:
         return refined
 
 
+class DirectParseBedrock:
+    def __init__(self):
+        self.calls = 0
+        self.direct_calls = 0
+
+    def refine(self, text: str, heuristic_result: dict) -> dict:
+        self.calls += 1
+        return heuristic_result
+
+    def parse_transcript(self, text: str) -> dict:
+        self.direct_calls += 1
+        return {
+            "document_type": "high_school_transcript",
+            "student": {"name": "Adelaide Betts", "student_id": None, "date_of_birth": "02/14/2009"},
+            "institutions": [{"name": "Betts Academy", "type": "high_school"}],
+            "academic_summary": {"gpa": 4.0, "total_credits_attempted": 1.0, "total_credits_earned": 1.0, "class_rank": None},
+            "terms": [{"term_name": "2025-2026", "courses": [{"course_code": None, "course_title": "Civics", "credits": 0.5, "grade": "A", "term": "2025-2026"}]}],
+            "parser_confidence": 0.9,
+        }
+
+
 class FailingTextract:
     def extract(self, content: bytes) -> str:
         raise RuntimeError("UnsupportedDocumentException")
@@ -704,6 +725,24 @@ def test_pipeline_preserves_heuristic_student_when_bedrock_returns_blank_student
     assert result["demographic"]["middleName"] == "JEFFREY"
     assert result["demographic"]["lastName"] == "TURPIN"
     assert len(result["courses"]) == 2
+
+
+def test_pipeline_uses_direct_bedrock_parse_when_required_data_missing(monkeypatch):
+    monkeypatch.setattr(settings, "use_bedrock", True)
+    bedrock = DirectParseBedrock()
+    pipeline = TranscriptPipeline(
+        local_extractor=DummyLocalExtractor("Official Transcript\nNo structured rows here"),
+        textract_extractor=DummyTextract(),
+        bedrock_mapper=bedrock,
+    )
+
+    result = pipeline.process("fallback.pdf", b"%PDF", "application/pdf", requested_document_type="auto", use_bedrock=True)
+
+    assert bedrock.direct_calls == 1
+    assert result["demographic"]["firstName"] == "Adelaide"
+    assert result["demographic"]["lastName"] == "Betts"
+    assert len(result["courses"]) == 1
+    assert "Bedrock direct parse fallback used because required transcript data was missing." in result["metadata"]["warnings"]
 
 
 def test_bedrock_mapper_normalizes_nested_transcript_json():

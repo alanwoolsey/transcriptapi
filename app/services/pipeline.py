@@ -163,6 +163,23 @@ class TranscriptPipeline:
             except BedrockResponseFormatError as exc:
                 logger.warning("Bedrock second pass skipped due to malformed JSON response: %s", exc)
                 warnings.append("Bedrock second pass returned malformed JSON; using heuristic parse.")
+        if use_bedrock and settings.use_bedrock and not self._has_required_transcript_data(parsed):
+            logger.info("Bedrock direct parse fallback enabled because required transcript data is still missing.")
+            direct_parse = getattr(self.bedrock_mapper, "parse_transcript", None)
+            if direct_parse is None:
+                warnings.append("Bedrock direct parse fallback unavailable; using available heuristic parse.")
+            else:
+                try:
+                    fallback = direct_parse(text=parse_text)
+                    parsed = self._merge(parsed, fallback, prefer_refined_student=True)
+                    parsed["terms"] = self.parser.ensure_course_confidences(parsed.get("terms", []))
+                    parsed["course_confidence_summary"] = self.parser.summarize_course_confidence(parsed.get("terms", []))
+                    overall_confidence = self._estimate_overall_confidence(text_assessment.score, parsed)
+                    bedrock_used = True
+                    warnings.append("Bedrock direct parse fallback used because required transcript data was missing.")
+                except BedrockResponseFormatError as exc:
+                    logger.warning("Bedrock direct parse fallback skipped due to malformed JSON response: %s", exc)
+                    warnings.append("Bedrock direct parse fallback returned malformed JSON; using available heuristic parse.")
         elif use_bedrock and settings.use_bedrock:
             logger.info("Skipping Bedrock second pass because heuristic confidence is sufficient.")
         else:
@@ -240,21 +257,27 @@ class TranscriptPipeline:
             logger.exception("Failed to capture heuristic learning candidate.")
             metadata["learning_status"] = "failed"
 
-    def _merge(self, base: Dict[str, Any], refined: Dict[str, Any]) -> Dict[str, Any]:
+    def _merge(self, base: Dict[str, Any], refined: Dict[str, Any], prefer_refined_student: bool = False) -> Dict[str, Any]:
         merged = dict(base)
         for key in ["document_type", "institutions", "academic_summary", "terms"]:
             refined_value = refined.get(key)
             if refined_value not in (None, [], {}, ""):
                 merged[key] = refined_value
         if refined.get("student") not in (None, {}, ""):
-            merged["student"] = self._merge_student(base.get("student", {}), refined.get("student", {}))
+            merged["student"] = self._merge_student(
+                base.get("student", {}),
+                refined.get("student", {}),
+                prefer_refined=prefer_refined_student,
+            )
         merged["parser_confidence"] = max(base.get("parser_confidence", 0.0), refined.get("parser_confidence", 0.0), 0.85)
         return merged
 
-    def _merge_student(self, base_student: Dict[str, Any], refined_student: Dict[str, Any]) -> Dict[str, Any]:
+    def _merge_student(self, base_student: Dict[str, Any], refined_student: Dict[str, Any], prefer_refined: bool = False) -> Dict[str, Any]:
         merged = dict(base_student or {})
         for key in ["name", "student_id", "date_of_birth"]:
             refined_value = (refined_student or {}).get(key)
+            if key == "name" and merged.get("name") and not prefer_refined:
+                continue
             if refined_value not in (None, "", {}, []):
                 merged[key] = refined_value
         refined_address = (refined_student or {}).get("address")
@@ -331,6 +354,11 @@ class TranscriptPipeline:
         if visible_course_rows_estimate >= 4 and course_count < visible_course_rows_estimate:
             return True
         return False
+
+    def _has_required_transcript_data(self, parsed: Dict[str, Any]) -> bool:
+        student = parsed.get("student") or {}
+        course_count = sum(len(term.get("courses", [])) for term in parsed.get("terms", []) or [])
+        return bool((student.get("student_id") or student.get("name")) and course_count > 0)
 
     def _estimate_visible_course_rows(self, text: str) -> int:
         normalized = re.sub(r"\s+", " ", text)

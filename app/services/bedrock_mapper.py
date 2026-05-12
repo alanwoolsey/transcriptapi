@@ -26,6 +26,10 @@ class BedrockMapper:
         prompt = self._build_prompt(text=text, heuristic_result=heuristic_result)
         return self._normalize_refinement_payload(self._invoke_json_prompt(prompt=prompt, log_label="transcript refinement"))
 
+    def parse_transcript(self, text: str) -> Dict[str, Any]:
+        prompt = self._build_direct_parse_prompt(text=text)
+        return self._normalize_refinement_payload(self._invoke_json_prompt(prompt=prompt, log_label="direct transcript parse"))
+
     def propose_heuristic_rule(self, text: str, heuristic_result: Dict[str, Any], repaired_result: Dict[str, Any]) -> Dict[str, Any]:
         prompt = self._build_rule_prompt(text=text, heuristic_result=heuristic_result, repaired_result=repaired_result)
         return self._invoke_json_prompt(prompt=prompt, log_label="heuristic rule proposal")
@@ -140,6 +144,46 @@ Heuristic extraction result:
 
 Transcript text:
 {text[:18000]}
+""".strip()
+
+    def _build_direct_parse_prompt(self, text: str) -> str:
+        return f"""
+Parse this transcript into JSON.
+Only return valid JSON. Do not wrap it in markdown.
+
+Return either this exact schema:
+{{
+  "document_type": "college_transcript|high_school_transcript|unknown",
+  "student": {{"name": string|null, "student_id": string|null, "date_of_birth": string|null}},
+  "institutions": [{{"name": string|null, "type": "college|high_school|unknown"}}],
+  "academic_summary": {{
+    "gpa": number|null,
+    "total_credits_attempted": number|null,
+    "total_credits_earned": number|null,
+    "class_rank": string|null
+  }},
+  "terms": [{{
+    "term_name": string,
+    "courses": [{{
+      "course_code": string|null,
+      "course_title": string|null,
+      "credits": number|null,
+      "grade": string|null,
+      "term": string|null
+    }}]
+  }}]
+}}
+
+Or, if easier, return a nested object with a top-level "transcript" key containing student, school, summary, and academic_record.
+
+Rules:
+- Extract the student name exactly as shown when present.
+- Include all visible course rows.
+- Return null for unknown values.
+- Do not invent identifiers or grades.
+
+Transcript text:
+{text[:30000]}
 """.strip()
 
     def _build_rule_prompt(self, text: str, heuristic_result: Dict[str, Any], repaired_result: Dict[str, Any]) -> str:
