@@ -314,7 +314,12 @@ class TranscriptPipeline:
         average_course_confidence = float(course_summary.get("average", 0.0) or 0.0)
         low_confidence_count = int(course_summary.get("low_confidence_count", 0) or 0)
         course_count = int(course_summary.get("count", 0) or 0)
+        student = parsed.get("student") or {}
 
+        if not (student.get("student_id") or student.get("name")):
+            return True
+        if course_count == 0:
+            return True
         if parser_confidence < settings.heuristic_parse_min_confidence:
             return True
         if overall_confidence < settings.heuristic_overall_min_confidence:

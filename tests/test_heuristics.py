@@ -934,6 +934,66 @@ def test_parser_extracts_adult_education_header_student_identity():
     assert parsed["institutions"][0]["name"] == "Horizonte Instruction and Training Center"
 
 
+def test_parser_handles_homeschool_student_table_and_courses():
+    parser = TranscriptHeuristicParser()
+    text = """
+    Student Information
+    Student name
+    Address
+    City, State Zip
+    Phone number
+    Email address
+    Date of birth
+    Parent/guardian
+    Adelaide Betts
+    730 N. 804 W.,
+    Midway, UT 84049
+    2532686565
+    kayrenab@gmail.com
+    02/14/2009
+    Kayrena Betts
+    School Information
+    School name
+    Address
+    City, State Zip
+    Phone number
+    Email address
+    Betts Academy
+    730 N. 804 W.,
+    Midway, UT 84049
+    2532686565
+    kayrenab@gmail.com
+    Academic Summary
+    Cumulative GPA
+    Credits Attempted
+    Credits Earned
+    Diploma Earned
+    Graduation Date
+    4.00
+    28.5
+    28.5
+    Yes
+    May 22, 2026
+    12th Grade Aug 2025-May 2026
+    Course Code Type CreditAttempted CreditEarned Grade(to date)
+    PE 12 0.5 0.5 A
+    Forensics w/Lab Apologia Online 1 1 A
+    Language Arts HS 3 LA3 1 1 A
+    """.strip()
+
+    document_type = parser.detect_document_type(text)
+    parsed = parser.parse(text, document_type)
+    courses = parsed["terms"][0]["courses"]
+
+    assert parsed["document_type"] == "high_school_transcript"
+    assert parsed["student"]["name"] == "Adelaide Betts"
+    assert parsed["student"]["date_of_birth"] == "02/14/2009"
+    assert parsed["institutions"][0]["name"] == "Betts Academy"
+    assert parsed["academic_summary"]["total_credits_earned"] == 28.5
+    assert [course["course_title"] for course in courses] == ["PE 12", "Forensics w/Lab Apologia Online", "Language Arts HS 3"]
+    assert courses[2]["course_code"] == "LA3"
+
+
 def test_parser_handles_student_achievement_summary_transcript_rows():
     parser = TranscriptHeuristicParser()
     text = """

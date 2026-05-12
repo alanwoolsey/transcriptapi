@@ -24,7 +24,7 @@ class BedrockMapper:
 
     def refine(self, text: str, heuristic_result: Dict[str, Any]) -> Dict[str, Any]:
         prompt = self._build_prompt(text=text, heuristic_result=heuristic_result)
-        return self._invoke_json_prompt(prompt=prompt, log_label="transcript refinement")
+        return self._normalize_refinement_payload(self._invoke_json_prompt(prompt=prompt, log_label="transcript refinement"))
 
     def propose_heuristic_rule(self, text: str, heuristic_result: Dict[str, Any], repaired_result: Dict[str, Any]) -> Dict[str, Any]:
         prompt = self._build_rule_prompt(text=text, heuristic_result=heuristic_result, repaired_result=repaired_result)
@@ -75,7 +75,7 @@ class BedrockMapper:
                     "content": [{"text": prompt}],
                 }
             ],
-            inferenceConfig={"maxTokens": 1800, "temperature": 0.0},
+            inferenceConfig={"maxTokens": settings.bedrock_max_tokens, "temperature": settings.bedrock_temperature},
         )
 
     def _should_retry_with_fallback_model(self, exc: Exception, model_id: str) -> bool:
@@ -206,3 +206,64 @@ Transcript text:
                 exc.pos,
             )
             raise BedrockResponseFormatError(f"Bedrock returned malformed JSON: {exc}") from exc
+
+    def _normalize_refinement_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict) or "transcript" not in payload:
+            return payload
+        transcript = payload.get("transcript")
+        if not isinstance(transcript, dict):
+            return payload
+
+        student = transcript.get("student") if isinstance(transcript.get("student"), dict) else {}
+        school = transcript.get("school") if isinstance(transcript.get("school"), dict) else {}
+        summary = transcript.get("summary") if isinstance(transcript.get("summary"), dict) else {}
+        academic_record = transcript.get("academic_record") if isinstance(transcript.get("academic_record"), list) else []
+
+        terms = []
+        for record in academic_record:
+            if not isinstance(record, dict):
+                continue
+            courses = []
+            for course in record.get("courses") or []:
+                if not isinstance(course, dict):
+                    continue
+                courses.append(
+                    {
+                        "course_code": None,
+                        "course_title": course.get("course_name") or course.get("course_title"),
+                        "credits": course.get("credits"),
+                        "grade": self._select_course_grade(course.get("course_grades")),
+                        "term": record.get("school_year"),
+                    }
+                )
+            if courses:
+                terms.append({"term_name": record.get("school_year") or "Unassigned", "courses": courses})
+
+        return {
+            "document_type": "high_school_transcript",
+            "student": {
+                "name": student.get("name"),
+                "student_id": student.get("student_id") or student.get("ssid") or transcript.get("parchment_student_id"),
+                "date_of_birth": student.get("birth_date") or student.get("date_of_birth"),
+            },
+            "institutions": [{"name": school.get("name"), "type": "high_school"}] if school.get("name") else [],
+            "academic_summary": {
+                "gpa": summary.get("cumulative_gpa"),
+                "total_credits_attempted": summary.get("cumulative_credits"),
+                "total_credits_earned": summary.get("cumulative_credits"),
+                "class_rank": None,
+            },
+            "terms": terms,
+            "parser_confidence": 0.9 if terms or student.get("name") else 0.0,
+        }
+
+    def _select_course_grade(self, grades: Any) -> str | None:
+        if isinstance(grades, dict):
+            for _key, value in sorted(grades.items(), key=lambda item: str(item[0]), reverse=True):
+                if value:
+                    return str(value)
+        if isinstance(grades, list):
+            for value in reversed(grades):
+                if value:
+                    return str(value)
+        return str(grades) if grades else None

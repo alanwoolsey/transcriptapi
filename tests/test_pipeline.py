@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from app.core.config import settings
+from app.services.bedrock_mapper import BedrockMapper
 from app.services.pipeline import TranscriptPipeline
 from app.models.api_models import ParseTranscriptResponse
 
@@ -703,6 +704,38 @@ def test_pipeline_preserves_heuristic_student_when_bedrock_returns_blank_student
     assert result["demographic"]["middleName"] == "JEFFREY"
     assert result["demographic"]["lastName"] == "TURPIN"
     assert len(result["courses"]) == 2
+
+
+def test_bedrock_mapper_normalizes_nested_transcript_json():
+    mapper = BedrockMapper()
+
+    normalized = mapper._normalize_refinement_payload(
+        {
+            "transcript": {
+                "parchment_student_id": "99650373",
+                "student": {"name": "Escobar, Flor", "ssid": "77162", "birth_date": "Aug 12, 1992"},
+                "school": {"name": "Horizonte Instruction and Training Center"},
+                "summary": {"cumulative_credits": 24.0, "cumulative_gpa": 2.215},
+                "academic_record": [
+                    {
+                        "school_year": "2007-2008",
+                        "courses": [
+                            {
+                                "course_name": "Algebra 1",
+                                "credits": 0.25,
+                                "course_grades": {"1": "D-", "2": "F"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+    )
+
+    assert normalized["student"]["name"] == "Escobar, Flor"
+    assert normalized["student"]["student_id"] == "77162"
+    assert normalized["institutions"][0]["name"] == "Horizonte Instruction and Training Center"
+    assert normalized["terms"][0]["courses"][0]["grade"] == "F"
 
 
 def test_pipeline_uses_ocr_when_pdf_text_is_not_readable():

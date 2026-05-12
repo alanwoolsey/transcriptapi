@@ -69,6 +69,8 @@ class TranscriptHeuristicParser:
             return "college_transcript"
 
         lowered = text.lower()
+        if "student information" in lowered and "school information" in lowered and "academic summary" in lowered and "diploma earned" in lowered:
+            return "high_school_transcript"
         if "utah adult education official transcript" in lowered:
             return "high_school_transcript"
         if "milwaukee area technical college" in lowered and "transcript" in lowered:
@@ -2169,7 +2171,7 @@ class TranscriptHeuristicParser:
         return course, idx
 
     def _parse_student(self, text_lines: List[str]) -> Dict[str, Any]:
-        student = {
+        student = self._extract_student_information_table(text_lines) or {
             "name": None,
             "student_id": None,
             "date_of_birth": None,
@@ -2226,6 +2228,52 @@ class TranscriptHeuristicParser:
                 break
         return student
 
+    def _extract_student_information_table(self, text_lines: List[str]) -> Dict[str, Any] | None:
+        labels = [self._normalize_logan_text(line).lower() for line in text_lines]
+        try:
+            start = labels.index("student information")
+        except ValueError:
+            return None
+        try:
+            school_start = next(idx for idx in range(start + 1, len(labels)) if labels[idx] == "school information")
+        except StopIteration:
+            return None
+
+        expected_labels = {"student name", "address", "city, state zip", "phone number", "email address", "date of birth", "parent/guardian"}
+        label_lines: list[str] = []
+        for line in text_lines[start + 1 : school_start]:
+            compact = line.strip()
+            if compact.lower() not in expected_labels:
+                break
+            label_lines.append(compact)
+        if not any(line.lower() == "student name" for line in label_lines):
+            return None
+        value_start = start + 1 + len(label_lines)
+        value_lines = [line.strip() for line in text_lines[value_start : value_start + len(label_lines)] if line.strip()]
+        if len(value_lines) != len(label_lines):
+            return None
+
+        table = {label.lower(): value for label, value in zip(label_lines, value_lines)}
+        name = table.get("student name")
+        if not name or not self._looks_like_person_name(name):
+            return None
+        address = {"street": None, "city": None, "state": None, "postal_code": None}
+        if table.get("address"):
+            address["street"] = table.get("address")
+        city_state_zip = table.get("city, state zip")
+        if city_state_zip:
+            city_match = re.match(r"^(.+?),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$", city_state_zip)
+            if city_match:
+                address["city"] = city_match.group(1)
+                address["state"] = city_match.group(2)
+                address["postal_code"] = city_match.group(3)
+        return {
+            "name": self._normalize_name_value(name),
+            "student_id": None,
+            "date_of_birth": table.get("date of birth"),
+            "address": address,
+        }
+
     def _parse_institutions(self, text_lines: List[str], document_type: str) -> List[Dict[str, Any]]:
         institutions: List[Dict[str, Any]] = []
         inst_type = "college" if document_type == "college_transcript" else "high_school" if document_type == "high_school_transcript" else "unknown"
@@ -2263,6 +2311,9 @@ class TranscriptHeuristicParser:
         return any(keyword in lowered for keyword in self.INSTITUTION_KEYWORDS)
 
     def _parse_summary(self, text: str) -> Dict[str, Any]:
+        table_summary = self._parse_academic_summary_table(lines(text))
+        if table_summary:
+            return table_summary
         gpa = self._find_float(self.GPA_PATTERN, text)
         earned = self._find_float(self.EARNED_PATTERN, text)
         attempted = self._find_float(self.ATTEMPTED_PATTERN, text)
@@ -2272,6 +2323,33 @@ class TranscriptHeuristicParser:
             "total_credits_attempted": attempted,
             "total_credits_earned": earned,
             "class_rank": rank_match.group(1).strip() if rank_match else None,
+        }
+
+    def _parse_academic_summary_table(self, text_lines: List[str]) -> Dict[str, Any] | None:
+        labels = [self._normalize_logan_text(line).lower() for line in text_lines]
+        try:
+            start = labels.index("academic summary")
+        except ValueError:
+            return None
+        expected_labels = {"cumulative gpa", "credits attempted", "credits earned", "diploma earned", "graduation date"}
+        label_lines: list[str] = []
+        for line in text_lines[start + 1 : min(start + 12, len(text_lines))]:
+            compact = line.strip()
+            if compact.lower() not in expected_labels:
+                break
+            label_lines.append(compact)
+        if not {"cumulative gpa", "credits attempted", "credits earned"}.issubset({line.lower() for line in label_lines}):
+            return None
+        value_start = start + 1 + len(label_lines)
+        value_lines = [line.strip() for line in text_lines[value_start : value_start + len(label_lines)] if line.strip()]
+        if len(value_lines) != len(label_lines):
+            return None
+        table = {label.lower(): value for label, value in zip(label_lines, value_lines)}
+        return {
+            "gpa": self._safe_float(table.get("cumulative gpa")),
+            "total_credits_attempted": self._safe_float(table.get("credits attempted")),
+            "total_credits_earned": self._safe_float(table.get("credits earned")),
+            "class_rank": None,
         }
 
     def _find_float(self, pattern: re.Pattern[str], text: str) -> float | None:
@@ -2520,9 +2598,15 @@ class TranscriptHeuristicParser:
         compact = re.sub(r"\s+", " ", line).strip()
         if len(compact) < 8:
             return None
+        if " " not in compact and any(ch.isalpha() for ch in compact) and any(ch.isdigit() for ch in compact):
+            return None
 
         if self._should_skip_non_course_line(compact):
             return None
+
+        homeschool_course = self._parse_homeschool_course_line(compact)
+        if homeschool_course:
+            return homeschool_course
 
         pattern_match = self.COURSE_LINE_PATTERN.match(compact) or self.COURSE_LINE_PATTERN_GRADE_THEN_CREDITS.match(compact)
         if pattern_match:
@@ -2632,6 +2716,42 @@ class TranscriptHeuristicParser:
             confidence_reasons=confidence_reasons,
         )
 
+    def _parse_homeschool_course_line(self, compact: str) -> TranscriptCourse | None:
+        match = re.match(
+            rf"^(?P<title>.+?)\s+(?:(?P<course_type>[A-Z]{{2,6}}\d?)\s+)?(?P<attempted>\d+(?:\.\d+)?)\s+(?P<earned>\d+(?:\.\d+)?)\s+(?P<grade>{self.GRADE_TOKEN_PATTERN})$",
+            compact,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        title = match.group("title").strip(" -")
+        if not title or len(title) < 3 or self._should_skip_non_course_line(title):
+            return None
+        if re.search(r"\b(total credits|gpa|cumulative)\b", title, re.IGNORECASE):
+            return None
+        credits = self._safe_float(match.group("earned"))
+        if credits is None:
+            return None
+        course_code = match.group("course_type")
+        if course_code and course_code != course_code.upper():
+            title = f"{title} {course_code}".strip()
+            course_code = None
+        confidence_score, confidence_reasons = self._estimate_course_confidence(
+            course_code=course_code,
+            course_title=title,
+            credits=credits,
+            grade=match.group("grade").upper(),
+            term=None,
+        )
+        return TranscriptCourse(
+            course_code=course_code,
+            course_title=title,
+            credits=credits,
+            grade=match.group("grade").upper(),
+            confidence_score=confidence_score,
+            confidence_reasons=confidence_reasons,
+        )
+
     def _normalize_high_school_credit(self, value: str) -> float | None:
         credits = self._safe_float(value)
         if credits is None:
@@ -2684,6 +2804,9 @@ class TranscriptHeuristicParser:
             lowered = line.strip().lower()
             if "madison college unofficial" in lowered or lowered == "madison college":
                 return "Madison College"
+        table_school_name = self._extract_school_information_name(text_lines)
+        if table_school_name:
+            return table_school_name
         for idx, line in enumerate(text_lines[:10]):
             if "utah adult education official transcript" not in line.strip().lower():
                 continue
@@ -2710,6 +2833,30 @@ class TranscriptHeuristicParser:
                     ):
                         return candidate.strip()
         return None
+
+    def _extract_school_information_name(self, text_lines: List[str]) -> str | None:
+        labels = [self._normalize_logan_text(line).lower() for line in text_lines]
+        try:
+            school_start = labels.index("school information")
+            summary_start = next(idx for idx in range(school_start + 1, len(labels)) if labels[idx] == "academic summary")
+        except (ValueError, StopIteration):
+            return None
+        expected_labels = {"school name", "address", "city, state zip", "phone number", "email address"}
+        label_lines: list[str] = []
+        for line in text_lines[school_start + 1 : summary_start]:
+            compact = line.strip()
+            if compact.lower() not in expected_labels:
+                break
+            label_lines.append(compact)
+        if not any(line.lower() == "school name" for line in label_lines):
+            return None
+        value_start = school_start + 1 + len(label_lines)
+        value_lines = [line.strip() for line in text_lines[value_start : value_start + len(label_lines)] if line.strip()]
+        if len(value_lines) != len(label_lines):
+            return None
+        table = {label.lower(): value for label, value in zip(label_lines, value_lines)}
+        school_name = table.get("school name")
+        return school_name if school_name and not self._looks_like_courseish_institution_candidate(school_name) else None
 
     def _looks_like_courseish_institution_candidate(self, candidate: str) -> bool:
         compact = re.sub(r"\s+", " ", (candidate or "").strip())

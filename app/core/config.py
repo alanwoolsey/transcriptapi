@@ -27,7 +27,9 @@ class Settings(BaseSettings):
     cognito_clock_skew_seconds: int = 60
     use_textract: bool = True
     use_bedrock: bool = True
-    bedrock_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    bedrock_model_id: str = "us.amazon.nova-2-lite-v1:0"
+    bedrock_max_tokens: int = 4096
+    bedrock_temperature: float = 0.0
     heuristic_min_char_count: int = 250
     heuristic_min_alpha_ratio: float = 0.55
     heuristic_min_line_count: int = 8
