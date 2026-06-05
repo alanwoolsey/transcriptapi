@@ -37,6 +37,7 @@ from app.db.models import (
 from app.db.session import get_session_factory
 from app.models.ops_models import (
     ChecklistItemResponse,
+    StudentChecklistResponse,
     DocumentExceptionItem,
     DocumentExceptionsResponse,
     LinkChecklistItemRequest,
@@ -88,12 +89,26 @@ class AdmissionsOpsService:
         self.work_state_projector = WorkStateProjector(session_factory=self.session_factory)
         self.agent_run_service = AgentRunService(session_factory=self.session_factory)
 
-    def get_student_checklist(self, tenant_id: UUID, student_id: str) -> list[ChecklistItemResponse]:
+    VALID_CHECKLIST_STATUSES = {
+        "not_started",
+        "requested",
+        "received",
+        "needs_review",
+        "waived",
+        "complete",
+        "blocked",
+        "rejected",
+        "expired",
+    }
+    BLOCKING_CHECKLIST_STATUSES = {"not_started", "requested", "received", "needs_review", "blocked", "rejected", "expired"}
+    COMPLETE_CHECKLIST_STATUSES = {"complete", "waived", "not_required"}
+
+    def get_student_checklist(self, tenant_id: UUID, student_id: str) -> StudentChecklistResponse:
         session_factory = self.session_factory()
         with session_factory() as session:
             context = self._ensure_student_state(session, tenant_id, student_id)
             session.commit()
-            return self._serialize_checklist_items(context.items)
+            return self._serialize_checklist(context)
 
     def update_checklist_item_status(
         self,
@@ -103,9 +118,11 @@ class AdmissionsOpsService:
         student_id: str,
         item_id: str,
         status: str,
-    ) -> list[ChecklistItemResponse]:
+    ) -> StudentChecklistResponse:
         normalized_status = status.strip().lower()
-        if normalized_status not in {"missing", "needs_review", "complete"}:
+        if normalized_status == "missing":
+            normalized_status = "not_started"
+        if normalized_status not in self.VALID_CHECKLIST_STATUSES:
             raise AdmissionsOpsValidationError("Invalid checklist item status.")
 
         context = self._ensure_student_state(db, tenant_id, student_id)
@@ -161,7 +178,7 @@ class AdmissionsOpsService:
             )
         self.work_state_projector.refresh_student_projection(db, tenant_id=tenant_id, student_id=context.student.id)
         db.commit()
-        return self._serialize_checklist_items(context.items)
+        return self._serialize_checklist(context)
 
     def get_student_readiness(self, tenant_id: UUID, student_id: str) -> StudentReadinessResponse:
         session_factory = self.session_factory()
@@ -230,18 +247,39 @@ class AdmissionsOpsService:
             session.commit()
             return WorkItemsResponse(items=paged, page=(offset // limit) + 1, pageSize=limit, total=total)
 
-    def get_today_work(self, tenant_id: UUID, *, limit: int = 25) -> WorkTodayResponse:
+    def get_today_work(
+        self,
+        tenant_id: UUID,
+        *,
+        section: str | None = None,
+        population: str | None = None,
+        owner: str | None = None,
+        priority: str | None = None,
+        aging_bucket: str | None = None,
+        q: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> WorkTodayResponse:
         self.work_state_projector.ensure_tenant_projection(tenant_id)
         session_factory = self.session_factory()
         with session_factory() as session:
-            rows, agent_state_by_student, run_by_id = self._load_today_work_context(session, tenant_id)
+            rows, agent_state_by_student, run_by_id = self._load_today_work_context(
+                session,
+                tenant_id,
+                section=section,
+                population=population,
+                owner=owner,
+                priority=priority,
+                aging_bucket=aging_bucket,
+                q=q,
+            )
             items = [
                 self._build_today_work_item(
                     row,
                     agent_state_by_student.get(row.student_id),
                     run_by_id,
                 )
-                for row in rows[:limit]
+                for row in rows[offset : offset + limit]
             ]
             session.commit()
             return WorkTodayResponse(items=items, total=len(rows))
@@ -557,7 +595,10 @@ class AdmissionsOpsService:
         actor_user_id: UUID,
         document_id: str,
         payload: LinkChecklistItemRequest,
-    ) -> list[ChecklistItemResponse]:
+    ) -> StudentChecklistResponse:
+        match_status = payload.matchStatus.strip().lower()
+        if match_status not in {"auto_completed", "needs_review", "unresolved"}:
+            raise AdmissionsOpsValidationError("Invalid checklist link match status.")
         student = self._resolve_student(db, tenant_id, payload.studentId)
         if student is None:
             raise AdmissionsOpsNotFoundError("Student not found.")
@@ -586,7 +627,7 @@ class AdmissionsOpsService:
             db.add(link)
 
         link.match_confidence = self._to_decimal(payload.matchConfidence)
-        link.match_status = payload.matchStatus
+        link.match_status = match_status
         link.linked_at = now
         link.linked_by = "user"
 
@@ -596,11 +637,11 @@ class AdmissionsOpsService:
         item.updated_by_user_id = actor_user_id
         item.updated_by_system = False
         item.updated_at = now
-        if payload.matchStatus == "auto_completed":
+        if match_status == "auto_completed":
             item.status = "complete"
             item.needs_review = False
             item.completed_at = now
-        elif payload.matchStatus == "needs_review":
+        elif match_status == "needs_review":
             item.status = "needs_review"
             item.needs_review = True
             item.completed_at = None
@@ -623,7 +664,7 @@ class AdmissionsOpsService:
                 "student_id": str(student.id),
                 "document_id": str(document.id),
                 "checklist_item_id": str(item.id),
-                "match_status": payload.matchStatus,
+                "match_status": match_status,
                 "match_confidence": payload.matchConfidence,
             },
         )
@@ -644,7 +685,7 @@ class AdmissionsOpsService:
             )
         self.work_state_projector.refresh_student_projection(db, tenant_id=tenant_id, student_id=context.student.id)
         db.commit()
-        return self._serialize_checklist_items(context.items)
+        return self._serialize_checklist(context)
 
     def get_document_exceptions(self, tenant_id: UUID) -> DocumentExceptionsResponse:
         session_factory = self.session_factory()
@@ -791,7 +832,7 @@ class AdmissionsOpsService:
                     code=template_item.code,
                     label=template_item.label,
                     required=template_item.required,
-                    status="missing",
+                    status="not_started",
                     needs_review=template_item.review_required_default,
                     updated_by_system=True,
                     updated_at=now,
@@ -942,9 +983,10 @@ class AdmissionsOpsService:
     ) -> _ChecklistContext:
         required_items = [item for item in items if item.required]
         total_required = len(required_items)
-        completed_required = sum(1 for item in required_items if item.status in {"complete", "waived", "not_required"})
-        missing_items = [item for item in required_items if item.status == "missing"]
+        completed_required = sum(1 for item in required_items if item.status in self.COMPLETE_CHECKLIST_STATUSES)
+        missing_items = [item for item in required_items if item.status in {"not_started", "requested", "missing"}]
         review_items = [item for item in required_items if item.status in {"needs_review", "received"}]
+        hard_block_items = [item for item in required_items if item.status in {"blocked", "rejected", "expired"}]
         incomplete_required = len(required_items) - completed_required
 
         checklist.completion_percent = round((completed_required / total_required) * 100) if total_required else 100
@@ -967,23 +1009,34 @@ class AdmissionsOpsService:
             readiness.readiness_state = "blocked_by_trust"
             readiness.reason_code = "trust_block"
             readiness.reason_label = "Student is blocked by active trust review."
+        elif hard_block_items:
+            blocking_item = hard_block_items[0]
+            readiness.readiness_state = "blocked_by_document"
+            readiness.reason_code = blocking_item.status
+            readiness.reason_label = f"{blocking_item.label} is {blocking_item.status.replace('_', ' ')}."
         elif review_items:
             blocking_item = review_items[0]
-            readiness.readiness_state = "blocked_by_review"
+            readiness.readiness_state = "ready_for_review"
             readiness.reason_code = blocking_item.code
             readiness.reason_label = f"{blocking_item.label} requires staff review"
+        elif checklist.one_item_away and missing_items:
+            blocking_item = missing_items[0]
+            readiness.readiness_state = "nearly_complete"
+            readiness.reason_code = "missing_one_item"
+            readiness.reason_label = f"One required item remains: {blocking_item.label}."
         elif missing_items:
             blocking_item = missing_items[0]
-            readiness.readiness_state = "blocked_by_missing_item"
-            readiness.reason_code = blocking_item.code
-            readiness.reason_label = f"{blocking_item.label} is still missing"
+            readiness.readiness_state = "incomplete"
+            readiness.reason_code = "incomplete"
+            readiness.reason_label = f"{blocking_item.label} is still missing."
         else:
             readiness.readiness_state = "ready_for_decision"
             readiness.reason_code = "ready_for_decision"
-            readiness.reason_label = "Checklist is complete and ready for decision."
-        readiness.blocking_item_count = len(missing_items) + len(review_items)
+            readiness.reason_label = "All required items are complete and trust is clear."
+        readiness.blocking_item_count = len([item for item in required_items if item.status in self.BLOCKING_CHECKLIST_STATUSES or item.status == "missing"])
         readiness.trust_blocked = trust_blocked
         readiness.computed_at = datetime.now(timezone.utc)
+        readiness._phase1_blockers = [item for item in required_items if item.status in self.BLOCKING_CHECKLIST_STATUSES or item.status == "missing"]
 
         priority = session.execute(
             select(StudentPriorityScore).where(
@@ -1036,7 +1089,7 @@ class AdmissionsOpsService:
         )
         now = datetime.now(timezone.utc)
         signals: list[StudentSignal] = []
-        blocking_items = [item for item in items if item.required and item.status in {"missing", "needs_review", "received"}]
+        blocking_items = [item for item in items if item.required and (item.status in self.BLOCKING_CHECKLIST_STATUSES or item.status == "missing")]
         if checklist.one_item_away and blocking_items:
             signals.append(
                 StudentSignal(
@@ -1145,12 +1198,12 @@ class AdmissionsOpsService:
         blocking_items = [
             WorkBlockingItem(id=str(item.id), code=item.code, label=item.label, status=item.status)
             for item in context.items
-            if item.required and item.status in {"missing", "needs_review", "received"}
+            if item.required and (item.status in self.BLOCKING_CHECKLIST_STATUSES or item.status == "missing")
         ]
         required_items = [item for item in context.items if item.required]
         total_required = len(required_items)
-        completed_count = sum(1 for item in required_items if item.status in {"complete", "waived", "not_required"})
-        missing_count = sum(1 for item in required_items if item.status == "missing")
+        completed_count = sum(1 for item in required_items if item.status in self.COMPLETE_CHECKLIST_STATUSES)
+        missing_count = sum(1 for item in required_items if item.status in {"not_started", "requested", "missing"})
         review_count = sum(1 for item in required_items if item.status in {"needs_review", "received"})
         owner = self._load_owner(session, student.advisor_user_id)
         program_name = self._program_name(session, student)
@@ -1176,6 +1229,7 @@ class AdmissionsOpsService:
                 "state": context.readiness.readiness_state,
                 "label": self._title_case(context.readiness.readiness_state),
                 "tone": self._readiness_tone(context.readiness.readiness_state),
+                "reason": context.readiness.reason_label,
             },
             blockingItems=blocking_items,
             checklistSummary=WorkChecklistSummary(
@@ -1183,6 +1237,7 @@ class AdmissionsOpsService:
                 completedCount=completed_count,
                 missingCount=missing_count,
                 needsReviewCount=review_count,
+                blockerCount=len(blocking_items),
                 oneItemAway=context.checklist.one_item_away,
             ),
             fitScore=self._estimate_fit_score(student.latest_cumulative_gpa, student.accepted_credits, latest_confidence),
@@ -1282,20 +1337,31 @@ class AdmissionsOpsService:
             trust_run=trust_run,
             decision_run=decision_run,
         )
+        queue_group = self._today_queue_group(row, recommended_agent)
         return WorkTodayItemResponse(
             id=f"work_{row.student_id.hex[:12]}",
             studentId=row.student_identifier,
             studentName=row.student_name,
+            population=row.population,
+            stage=row.stage,
+            completionPercent=row.completion_percent,
             section=row.section,
             priority=row.priority,
             priorityScore=row.priority_score,
             owner=WorkItemOwner(id=(str(row.owner_user_id) if row.owner_user_id else None), name=row.owner_name),
             reasonToAct=WorkItemReason(code=row.reason_code, label=row.reason_label),
             suggestedAction=WorkItemReason(code=row.suggested_action_code, label=row.suggested_action_label),
+            readiness=dict(row.readiness_json or {}),
+            blockingItems=[WorkBlockingItem(**entry) for entry in list(row.blocking_items_json or [])],
+            checklistSummary=WorkChecklistSummary(**dict(row.checklist_summary_json or {})),
+            program=row.program,
+            institutionGoal=row.institution_goal,
+            risk=row.risk,
+            lastActivity=self._relative_time(row.last_activity_at),
             currentOwnerAgent=(agent_state.current_owner_agent if agent_state else None),
             currentStage=(agent_state.current_stage if agent_state else None),
             recommendedAgent=recommended_agent,
-            queueGroup=self._today_queue_group(recommended_agent),
+            queueGroup=queue_group,
             documentAgent=self._build_today_agent_summary(document_run),
             trustAgent=self._build_today_agent_summary(trust_run),
             decisionAgent=self._build_today_agent_summary(decision_run),
@@ -1364,14 +1430,27 @@ class AdmissionsOpsService:
         self,
         session: Session,
         tenant_id: UUID,
+        *,
+        section: str | None = None,
+        population: str | None = None,
+        owner: str | None = None,
+        priority: str | None = None,
+        aging_bucket: str | None = None,
+        q: str | None = None,
     ) -> tuple[list[StudentWorkState], dict[UUID, StudentAgentState], dict[UUID, AgentRun]]:
+        stmt = self._projected_work_items_query(
+            tenant_id,
+            section=section,
+            population=population,
+            owner=owner,
+            priority=priority,
+            aging_bucket=aging_bucket,
+            q=q,
+        )
+        if priority is None:
+            stmt = stmt.where(StudentWorkState.priority.in_(["urgent", "today"]))
         rows = session.execute(
-            select(StudentWorkState)
-            .where(
-                StudentWorkState.tenant_id == tenant_id,
-                StudentWorkState.priority.in_(["urgent", "today"]),
-            )
-            .order_by(
+            stmt.order_by(
                 StudentWorkState.priority_score.desc().nullslast(),
                 StudentWorkState.projected_at.desc(),
             )
@@ -1401,26 +1480,42 @@ class AdmissionsOpsService:
         return rows, agent_state_by_student, run_by_id
 
     def _group_today_work_items(self, items: list[WorkTodayItemResponse]) -> list[WorkTodayGroupResponse]:
-        group_order = ["trust_review", "decision_review", "document_recovery", "general_follow_up"]
+        group_order = [
+            "trust_blocked",
+            "one_item_away",
+            "document_blocked",
+            "ready_for_review",
+            "decision_waiting",
+            "incomplete_applicants",
+            "stalled_applicants",
+            "general_follow_up",
+        ]
         group_labels = {
-            "trust_review": "Trust Review",
-            "decision_review": "Decision Review",
-            "document_recovery": "Document Recovery",
+            "trust_blocked": "Trust Blocked",
+            "one_item_away": "One Item Away",
+            "document_blocked": "Document Blocked",
+            "ready_for_review": "Ready for Review",
+            "decision_waiting": "Decision Waiting",
+            "incomplete_applicants": "Incomplete Applicants",
+            "stalled_applicants": "Stalled Applicants",
             "general_follow_up": "General Follow-Up",
         }
         grouped_items: dict[str, list[WorkTodayItemResponse]] = {key: [] for key in group_order}
         for item in items:
-            grouped_items.setdefault(item.queueGroup or "general_follow_up", []).append(item)
+            group_key = self._normalize_today_group_key(item.queueGroup)
+            item.queueGroup = group_key
+            grouped_items.setdefault(group_key, []).append(item)
 
         groups: list[WorkTodayGroupResponse] = []
-        for key in group_order:
+        ordered_keys = [*group_order, *[key for key in grouped_items if key not in group_order]]
+        for key in ordered_keys:
             members = grouped_items.get(key, [])
             if not members:
                 continue
             groups.append(
                 WorkTodayGroupResponse(
                     key=key,
-                    label=group_labels[key],
+                    label=group_labels.get(key, self._title_case(key)),
                     total=len(members),
                     routeHint=self._group_route_hint(key, members),
                     items=members,
@@ -1428,33 +1523,62 @@ class AdmissionsOpsService:
             )
         return groups
 
-    def _today_queue_group(self, recommended_agent: str) -> str:
-        if recommended_agent == "trust_agent":
-            return "trust_review"
-        if recommended_agent == "decision_agent":
-            return "decision_review"
-        if recommended_agent == "document_agent":
-            return "document_recovery"
+    def _today_queue_group(self, projected: StudentWorkState, recommended_agent: str) -> str:
+        readiness = projected.readiness_json if isinstance(projected.readiness_json, dict) else {}
+        readiness_state = str(readiness.get("state") or "").lower()
+        reason_code = (projected.reason_code or "").lower()
+        suggested_action = (projected.suggested_action_code or "").lower()
+        checklist_summary = projected.checklist_summary_json if isinstance(projected.checklist_summary_json, dict) else {}
+        blocking_items = list(projected.blocking_items_json or [])
+
+        if (
+            recommended_agent == "trust_agent"
+            or readiness_state == "blocked_by_trust"
+            or reason_code == "trust_block"
+            or suggested_action == "review_trust"
+        ):
+            return "trust_blocked"
+        if readiness_state == "ready_for_decision" or reason_code == "ready_for_decision" or suggested_action == "move_to_decision":
+            return "decision_waiting"
+        if readiness_state == "ready_for_review":
+            return "ready_for_review"
+        if bool(checklist_summary.get("oneItemAway")):
+            return "one_item_away"
+        if blocking_items or reason_code in {"needs_review", "incomplete", "blocked", "rejected", "expired"} or suggested_action in {"review_document", "request_document"}:
+            return "document_blocked"
+        if projected.section == "attention":
+            return "incomplete_applicants"
+        if projected.priority == "soon":
+            return "stalled_applicants"
         return "general_follow_up"
+
+    def _normalize_today_group_key(self, group_key: str | None) -> str:
+        aliases = {
+            "trust_review": "trust_blocked",
+            "decision_review": "decision_waiting",
+            "document_recovery": "document_blocked",
+        }
+        normalized = (group_key or "general_follow_up").strip() or "general_follow_up"
+        return aliases.get(normalized, normalized)
 
     def _group_route_hint(
         self,
         group_key: str,
         members: list[WorkTodayItemResponse],
     ) -> WorkTodayGroupRouteHint:
-        if group_key == "trust_review":
+        if group_key == "trust_blocked":
             return WorkTodayGroupRouteHint(
                 nextAgent="trust_agent",
                 reason="Trust blockers or trust-review signals are driving this queue.",
                 actionLabel="Route to trust review",
             )
-        if group_key == "decision_review":
+        if group_key in {"decision_waiting", "ready_for_review"}:
             return WorkTodayGroupRouteHint(
                 nextAgent="decision_agent",
                 reason="These students are ready for recommendation or decision review.",
                 actionLabel="Route to decision review",
             )
-        if group_key == "document_recovery":
+        if group_key in {"document_blocked", "one_item_away", "incomplete_applicants", "stalled_applicants"}:
             return WorkTodayGroupRouteHint(
                 nextAgent="document_agent",
                 reason="Document intake or recovery work is the next required step.",
@@ -1576,19 +1700,22 @@ class AdmissionsOpsService:
 
     def _readiness_tone(self, readiness_state: str | None) -> str:
         normalized = (readiness_state or "").lower()
-        if normalized == "ready_for_decision":
-            return "positive"
-        if normalized == "blocked_by_trust":
+        if normalized in {"ready_for_decision", "ready_for_release"}:
+            return "low"
+        if normalized in {"blocked_by_trust", "blocked_by_document"}:
             return "high"
-        if normalized in {"blocked_by_review", "blocked_by_missing_item"}:
+        if normalized in {"ready_for_review", "nearly_complete", "incomplete", "blocked_by_review", "blocked_by_missing_item"}:
             return "medium"
-        return "neutral"
+        return "low"
 
     def _section_for_student(self, context: _ChecklistContext) -> str:
-        has_pending_evidence = any(item.required and item.status == "received" for item in context.items)
-        if context.readiness.trust_blocked or has_pending_evidence:
+        has_exception = (
+            context.readiness.trust_blocked
+            or any(item.required and item.status in {"blocked", "rejected", "expired"} for item in context.items)
+        )
+        if has_exception:
             return "exceptions"
-        if context.readiness.readiness_state == "ready_for_decision":
+        if context.readiness.readiness_state in {"ready_for_decision", "ready_for_review"}:
             return "ready"
         if context.checklist.one_item_away or (context.checklist.completion_percent >= 75 and not context.readiness.trust_blocked):
             return "close"
@@ -1609,7 +1736,7 @@ class AdmissionsOpsService:
             return ("urgent", 90, "missing_one_item")
         if checklist.status != "complete" and fit_score >= 85 and readiness.blocking_item_count > 0:
             return ("urgent", 88, "high_value_blocker")
-        if readiness.readiness_state == "ready_for_decision":
+        if readiness.readiness_state in {"ready_for_decision", "ready_for_review"}:
             return ("today", 80, "ready_for_decision")
         if checklist.completion_percent >= 75:
             return ("today", 75, "close_to_completion")
@@ -1618,21 +1745,23 @@ class AdmissionsOpsService:
         return ("soon", 55, "general_follow_up")
 
     def _reason_to_act(self, context: _ChecklistContext) -> WorkItemReason:
-        blocking_items = [item for item in context.items if item.required and item.status in {"missing", "needs_review", "received"}]
+        blocking_items = [item for item in context.items if item.required and (item.status in self.BLOCKING_CHECKLIST_STATUSES or item.status == "missing")]
         if context.readiness.trust_blocked:
             return WorkItemReason(code="trust_block", label="Trust hold requires intervention")
         if context.checklist.one_item_away and blocking_items:
             return WorkItemReason(code="missing_one_item", label=f"One item away: {blocking_items[0].label}")
         if context.readiness.readiness_state == "ready_for_decision":
             return WorkItemReason(code="ready_for_decision", label="Checklist complete and ready for decision")
+        if context.readiness.readiness_state == "ready_for_review":
+            return WorkItemReason(code="needs_review", label=f"{blocking_items[0].label if blocking_items else 'Evidence'} requires review")
         if blocking_items:
             first = blocking_items[0]
-            code = "needs_review" if first.status in {"needs_review", "received"} else first.code
+            code = "needs_review" if first.status in {"needs_review", "received"} else ("incomplete" if first.status in {"not_started", "requested", "missing"} else first.status)
             return WorkItemReason(code=code, label=f"{first.label} is blocking progress")
         return WorkItemReason(code=context.priority.reason_code, label="Student requires follow-up")
 
     def _suggested_action(self, context: _ChecklistContext) -> WorkItemReason:
-        blocking_items = [item for item in context.items if item.required and item.status in {"missing", "needs_review", "received"}]
+        blocking_items = [item for item in context.items if item.required and (item.status in self.BLOCKING_CHECKLIST_STATUSES or item.status == "missing")]
         if context.readiness.trust_blocked:
             return WorkItemReason(code="review_trust", label="Review trust blockers")
         if context.readiness.readiness_state == "ready_for_decision":
@@ -1689,11 +1818,17 @@ class AdmissionsOpsService:
 
     def _frontend_checklist_status(self, status: str) -> str:
         normalized = (status or "").lower()
-        if normalized in {"complete", "waived", "not_required"}:
-            return "complete"
-        if normalized in {"needs_review", "received"}:
-            return "needs_review"
-        return "missing"
+        return "not_started" if normalized == "missing" else normalized
+
+    def _serialize_checklist(self, context: _ChecklistContext) -> StudentChecklistResponse:
+        return StudentChecklistResponse(
+            studentId=self._student_identifier(context.student),
+            population=context.checklist.population,
+            completionPercent=context.checklist.completion_percent,
+            oneItemAway=context.checklist.one_item_away,
+            status=context.checklist.status,
+            items=self._serialize_checklist_items(context.items),
+        )
 
     def _serialize_checklist_items(self, items: list[StudentChecklistItem]) -> list[ChecklistItemResponse]:
         sorted_items = sorted(items, key=lambda item: (item.required is False, item.label.lower()))
@@ -1704,7 +1839,7 @@ class AdmissionsOpsService:
                 label=item.label,
                 required=item.required,
                 status=self._frontend_checklist_status(item.status),
-                done=self._frontend_checklist_status(item.status) == "complete",
+                done=self._frontend_checklist_status(item.status) in self.COMPLETE_CHECKLIST_STATUSES,
                 category=self._checklist_category(item.code),
                 receivedAt=self._isoformat(item.received_at),
                 completedAt=self._isoformat(item.completed_at),
@@ -1725,17 +1860,28 @@ class AdmissionsOpsService:
         return "application"
 
     def _serialize_readiness(self, student: Student, readiness: StudentDecisionReadiness) -> StudentReadinessResponse:
+        blockers = [
+            WorkBlockingItem(
+                id=str(item.id),
+                code=item.code,
+                label=item.label,
+                status=self._frontend_checklist_status(item.status),
+            )
+            for item in getattr(readiness, "_phase1_blockers", [])
+        ]
         return StudentReadinessResponse(
             studentId=self._student_identifier(student),
             state=readiness.readiness_state,
             label=self._title_case(readiness.readiness_state),
             reason=readiness.reason_label,
+            tone=self._readiness_tone(readiness.readiness_state),
             updatedAt=self._isoformat(readiness.computed_at) or self._isoformat(datetime.now(timezone.utc)),
             readinessState=readiness.readiness_state,
             reasonCode=readiness.reason_code,
             reasonLabel=readiness.reason_label,
             blockingItemCount=readiness.blocking_item_count,
             trustBlocked=readiness.trust_blocked,
+            blockers=blockers,
             computedAt=self._isoformat(readiness.computed_at) or self._isoformat(datetime.now(timezone.utc)),
         )
 

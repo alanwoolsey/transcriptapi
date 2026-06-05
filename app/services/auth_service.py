@@ -38,8 +38,9 @@ class AuthService:
         self._client = None
 
     def login(self, db: Session, payload: LoginRequest) -> AuthChallengeResponse | AuthSuccessResponse:
-        resolved = self._resolve_user(db, payload.username)
-        response = self._initiate_auth(payload.username, payload.password)
+        username = self._normalize_username(payload.username)
+        resolved = self._resolve_user(db, username)
+        response = self._initiate_auth(username, payload.password)
         auth_response = self._build_auth_response(resolved, response)
         if isinstance(auth_response, AuthSuccessResponse):
             self._activate_local_user(db, resolved.user.email, resolved.tenant.id)
@@ -50,9 +51,10 @@ class AuthService:
         db: Session,
         payload: CompleteNewPasswordRequest,
     ) -> AuthChallengeResponse | AuthSuccessResponse:
-        resolved = self._resolve_user(db, payload.username)
+        username = self._normalize_username(payload.username)
+        resolved = self._resolve_user(db, username)
         response = self._respond_to_new_password_challenge(
-            username=payload.username,
+            username=username,
             new_password=payload.new_password,
             session=payload.session,
         )
@@ -165,7 +167,12 @@ class AuthService:
             self._client = create_boto3_client("cognito-idp")
         return self._client
 
+    @staticmethod
+    def _normalize_username(username: str) -> str:
+        return username.strip().lower()
+
     def _resolve_user(self, db: Session, email: str) -> ResolvedAppUser:
+        email = self._normalize_username(email)
         stmt = (
             select(AppUser, Tenant)
             .join(TenantUserMembership, TenantUserMembership.user_id == AppUser.id)

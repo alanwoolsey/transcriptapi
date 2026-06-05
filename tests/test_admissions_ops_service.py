@@ -35,7 +35,60 @@ def test_recommend_today_agent_prefers_decision_when_student_is_ready():
     assert "ready for decision review" in reason
 
 
-def test_group_today_work_items_groups_by_recommended_agent_bucket():
+def test_group_today_work_items_groups_by_operating_bucket():
+    service = AdmissionsOpsService()
+
+    groups = service._group_today_work_items(
+        [
+            WorkTodayItemResponse(
+                id="work-1",
+                studentId="student-1",
+                studentName="A",
+                section="exceptions",
+                priority="urgent",
+                owner=WorkItemOwner(id=None, name="Owner"),
+                reasonToAct=WorkItemReason(code="trust_block", label="Trust block"),
+                suggestedAction=WorkItemReason(code="review_trust", label="Review trust"),
+                recommendedAgent="trust_agent",
+                queueGroup="trust_blocked",
+            ),
+            WorkTodayItemResponse(
+                id="work-2",
+                studentId="student-2",
+                studentName="B",
+                section="ready",
+                priority="urgent",
+                owner=WorkItemOwner(id=None, name="Owner"),
+                reasonToAct=WorkItemReason(code="ready_for_decision", label="Ready for decision"),
+                suggestedAction=WorkItemReason(code="review_recommendation", label="Review recommendation"),
+                recommendedAgent="decision_agent",
+                queueGroup="decision_waiting",
+            ),
+            WorkTodayItemResponse(
+                id="work-3",
+                studentId="student-3",
+                studentName="C",
+                section="ready",
+                priority="today",
+                owner=WorkItemOwner(id=None, name="Owner"),
+                reasonToAct=WorkItemReason(code="ready_for_decision", label="Ready for decision"),
+                suggestedAction=WorkItemReason(code="review_recommendation", label="Review recommendation"),
+                recommendedAgent="decision_agent",
+                queueGroup="decision_waiting",
+            ),
+        ]
+    )
+
+    assert [group.key for group in groups] == ["trust_blocked", "decision_waiting"]
+    assert groups[0].total == 1
+    assert groups[1].total == 2
+    assert groups[0].routeHint is not None
+    assert groups[0].routeHint.nextAgent == "trust_agent"
+    assert groups[1].routeHint is not None
+    assert groups[1].routeHint.nextAgent == "decision_agent"
+
+
+def test_group_today_work_items_normalizes_legacy_agent_buckets():
     service = AdmissionsOpsService()
 
     groups = service._group_today_work_items(
@@ -51,41 +104,12 @@ def test_group_today_work_items_groups_by_recommended_agent_bucket():
                 suggestedAction=WorkItemReason(code="review_trust", label="Review trust"),
                 recommendedAgent="trust_agent",
                 queueGroup="trust_review",
-            ),
-            WorkTodayItemResponse(
-                id="work-2",
-                studentId="student-2",
-                studentName="B",
-                section="ready",
-                priority="urgent",
-                owner=WorkItemOwner(id=None, name="Owner"),
-                reasonToAct=WorkItemReason(code="ready_for_decision", label="Ready for decision"),
-                suggestedAction=WorkItemReason(code="review_recommendation", label="Review recommendation"),
-                recommendedAgent="decision_agent",
-                queueGroup="decision_review",
-            ),
-            WorkTodayItemResponse(
-                id="work-3",
-                studentId="student-3",
-                studentName="C",
-                section="ready",
-                priority="today",
-                owner=WorkItemOwner(id=None, name="Owner"),
-                reasonToAct=WorkItemReason(code="ready_for_decision", label="Ready for decision"),
-                suggestedAction=WorkItemReason(code="review_recommendation", label="Review recommendation"),
-                recommendedAgent="decision_agent",
-                queueGroup="decision_review",
-            ),
+            )
         ]
     )
 
-    assert [group.key for group in groups] == ["trust_review", "decision_review"]
-    assert groups[0].total == 1
-    assert groups[1].total == 2
-    assert groups[0].routeHint is not None
-    assert groups[0].routeHint.nextAgent == "trust_agent"
-    assert groups[1].routeHint is not None
-    assert groups[1].routeHint.nextAgent == "decision_agent"
+    assert groups[0].key == "trust_blocked"
+    assert groups[0].items[0].queueGroup == "trust_blocked"
 
 
 def test_build_agent_run_result_requires_normalized_payload():

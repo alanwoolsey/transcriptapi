@@ -190,11 +190,23 @@ variable "db_multi_az" {
 variable "db_deletion_protection" {
   description = "Whether to protect the RDS instance from deletion."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "db_skip_final_snapshot" {
   description = "Whether to skip the final snapshot when destroying the database."
+  type        = bool
+  default     = false
+}
+
+variable "db_public_clone_deletion_protection" {
+  description = "Whether to protect the temporary public local-access clone from deletion."
+  type        = bool
+  default     = false
+}
+
+variable "db_public_clone_skip_final_snapshot" {
+  description = "Whether to skip the final snapshot when destroying the temporary public local-access clone."
   type        = bool
   default     = true
 }

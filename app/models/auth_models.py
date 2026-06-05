@@ -1,7 +1,7 @@
 from typing import Literal
 from uuid import UUID
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 
 class LoginRequest(BaseModel):
@@ -10,6 +10,11 @@ class LoginRequest(BaseModel):
     username: str = Field(validation_alias=AliasChoices("username", "email"))
     password: str
 
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, value: str) -> str:
+        return value.strip().lower()
+
 
 class CompleteNewPasswordRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -17,6 +22,11 @@ class CompleteNewPasswordRequest(BaseModel):
     username: str = Field(validation_alias=AliasChoices("username", "email"))
     new_password: str = Field(validation_alias=AliasChoices("new_password", "newPassword"))
     session: str
+
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, value: str) -> str:
+        return value.strip().lower()
 
 
 class ChangePasswordRequest(BaseModel):

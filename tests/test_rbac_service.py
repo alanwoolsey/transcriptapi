@@ -42,6 +42,27 @@ def test_resolve_profile_falls_back_to_membership_role(monkeypatch):
     assert profile.can_access_tier(SENSITIVITY_ACADEMIC_RECORD)
 
 
+def test_resolve_profile_accepts_direct_membership_role_key(monkeypatch):
+    service = RBACService()
+    monkeypatch.setattr(service, "sync_seed_data", lambda session: None)
+    session = _FakeSession([
+        [],  # role assignments
+        [],  # record exception grants
+    ])
+
+    profile = service.resolve_profile(
+        session,
+        tenant_id=uuid4(),
+        user_id=uuid4(),
+        membership_role="admissions_counselor",
+    )
+
+    assert profile.base_role == "admissions_counselor"
+    assert "admissions_counselor" in profile.roles
+    assert profile.can("view_student_360")
+    assert profile.can("edit_checklist")
+
+
 def test_resolve_profile_uses_explicit_assignment_rows(monkeypatch):
     service = RBACService()
     monkeypatch.setattr(service, "sync_seed_data", lambda session: None)

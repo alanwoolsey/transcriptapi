@@ -13,7 +13,10 @@ from app.services.student_360_service import Student360Service
 
 def _build_test_app() -> FastAPI:
     def override_auth_context():
-        yield SimpleNamespace(tenant=SimpleNamespace(id=uuid4()))
+        yield SimpleNamespace(
+            tenant=SimpleNamespace(id=uuid4()),
+            authorization=SimpleNamespace(can=lambda permission: True),
+        )
 
     app = FastAPI()
     app.dependency_overrides[get_current_tenant_context] = override_auth_context

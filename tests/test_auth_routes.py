@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 
 from app.api.auth_routes import router
 from app.db import get_db
@@ -34,6 +35,21 @@ def test_login_returns_404_when_local_user_mapping_is_missing(monkeypatch):
     assert response.json() == {"detail": "User not found."}
 
 
+def test_login_returns_503_when_database_is_unavailable(monkeypatch):
+    from app.api import auth_routes
+
+    def fake_login(db, payload):
+        raise OperationalError("select 1", {}, Exception("connection timeout expired"))
+
+    monkeypatch.setattr(auth_routes.auth_service, "login", fake_login)
+
+    client = TestClient(_build_test_app())
+    response = client.post("/api/auth/login", json={"username": "user@example.com", "password": "secret"})
+
+    assert response.status_code == 503
+    assert "Database is unavailable" in response.json()["detail"]
+
+
 def test_login_returns_new_password_required_challenge(monkeypatch):
     from app.api import auth_routes
 
@@ -61,6 +77,30 @@ def test_login_returns_new_password_required_challenge(monkeypatch):
         "challenge_name": "NEW_PASSWORD_REQUIRED",
         "session": "session-token",
     }
+
+
+def test_login_normalizes_username_before_service_call(monkeypatch):
+    from app.api import auth_routes
+
+    calls = {}
+
+    def fake_login(db, payload):
+        calls["username"] = payload.username
+        return {
+            "tenant_id": str(uuid4()),
+            "tenant_name": "Acme University",
+            "tenant_code": "acme",
+            "challenge_name": "NEW_PASSWORD_REQUIRED",
+            "session": "session-token",
+        }
+
+    monkeypatch.setattr(auth_routes.auth_service, "login", fake_login)
+
+    client = TestClient(_build_test_app())
+    response = client.post("/api/auth/login", json={"email": " Test1@Test.com ", "password": "secret"})
+
+    assert response.status_code == 200
+    assert calls["username"] == "test1@test.com"
 
 
 def test_complete_new_password_returns_tokens(monkeypatch):
@@ -145,6 +185,39 @@ def test_auth_service_uses_local_cognito_username_for_login(monkeypatch):
     assert calls == {"username": "user@example.com", "password": "secret"}
     assert response.tenant_code == "acme"
     assert response.access_token == "access-token"
+
+
+def test_auth_service_normalizes_username_for_login(monkeypatch):
+    service = AuthService()
+    calls = {}
+    resolved = SimpleNamespace(
+        user=SimpleNamespace(email="test1@test.com"),
+        tenant=SimpleNamespace(id=uuid4(), name="Acme University", slug="acme"),
+    )
+
+    def fake_resolve_user(db, email):
+        calls["resolved_email"] = email
+        return resolved
+
+    def fake_initiate_auth(username, password):
+        calls["cognito_username"] = username
+        return {
+            "AuthenticationResult": {
+                "AccessToken": "access-token",
+                "IdToken": "id-token",
+                "RefreshToken": "refresh-token",
+                "ExpiresIn": 3600,
+                "TokenType": "Bearer",
+            }
+        }
+
+    monkeypatch.setattr(service, "_resolve_user", fake_resolve_user)
+    monkeypatch.setattr(service, "_initiate_auth", fake_initiate_auth)
+
+    service.login(db=None, payload=SimpleNamespace(username=" Test1@Test.com ", password="secret"))
+
+    assert calls["resolved_email"] == "test1@test.com"
+    assert calls["cognito_username"] == "test1@test.com"
 
 
 def test_auth_service_prefers_default_active_membership(monkeypatch):

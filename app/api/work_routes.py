@@ -1,6 +1,6 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
 
-from app.api.dependencies import AuthenticatedTenantContext, get_current_tenant_context
+from app.api.dependencies import AuthenticatedTenantContext, require_permission
 from app.db import get_db
 from app.models.ops_models import (
     WorkItemsResponse,
@@ -32,7 +32,7 @@ def _run_projection_job(tenant_id: str, job_id: str) -> None:
 
 @router.get("/summary", response_model=WorkSummaryResponse)
 def get_work_summary(
-    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
 ) -> WorkSummaryResponse:
     return admissions_ops_service.get_work_summary(auth_context.tenant.id)
 
@@ -50,7 +50,7 @@ def get_work_items(
     offset: int = Query(default=0, ge=0),
     page: int | None = Query(default=None, ge=1),
     pageSize: int | None = Query(default=None, ge=1, le=200),
-    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
 ) -> WorkItemsResponse:
     resolved_limit = pageSize or limit
     resolved_offset = ((page - 1) * resolved_limit) if page else offset
@@ -69,16 +69,33 @@ def get_work_items(
 
 @router.get("/today", response_model=WorkTodayResponse)
 def get_today_work(
+    section: str | None = Query(default=None),
+    population: str | None = Query(default=None),
+    owner: str | None = Query(default=None),
+    priority: str | None = Query(default=None),
+    aging_bucket: str | None = Query(default=None),
+    q: str | None = Query(default=None),
     limit: int = Query(default=25, ge=1, le=100),
-    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    offset: int = Query(default=0, ge=0),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
 ) -> WorkTodayResponse:
-    return admissions_ops_service.get_today_work(auth_context.tenant.id, limit=limit)
+    return admissions_ops_service.get_today_work(
+        auth_context.tenant.id,
+        section=section,
+        population=population,
+        owner=owner,
+        priority=priority,
+        aging_bucket=aging_bucket,
+        q=q,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/today/board", response_model=WorkTodayBoardResponse)
 def get_today_work_board(
     limit: int = Query(default=50, ge=1, le=100),
-    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
 ) -> WorkTodayBoardResponse:
     return admissions_ops_service.get_today_work_board(auth_context.tenant.id, limit=limit)
 
@@ -86,7 +103,7 @@ def get_today_work_board(
 @router.post("/today/orchestrate", response_model=WorkTodayOrchestrationResponse)
 def orchestrate_today_work(
     limit: int = Query(default=50, ge=1, le=100),
-    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
     db=Depends(get_db),
 ) -> WorkTodayOrchestrationResponse:
     return admissions_ops_service.orchestrate_today_work(
@@ -100,7 +117,7 @@ def orchestrate_today_work(
 @router.get("/today/orchestrations/latest", response_model=WorkTodayOrchestrationResponse)
 def get_latest_today_work_orchestration(
     studentId: str | None = Query(default=None),
-    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
 ) -> WorkTodayOrchestrationResponse:
     try:
         return admissions_ops_service.get_latest_today_work_orchestration(
@@ -116,7 +133,7 @@ def get_latest_today_work_orchestration(
 @router.get("/today/{student_id}/recommendation", response_model=WorkTodayRecommendationResponse)
 def get_today_work_recommendation(
     student_id: str,
-    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
 ) -> WorkTodayRecommendationResponse:
     try:
         return admissions_ops_service.get_today_work_recommendation(
@@ -137,7 +154,7 @@ def get_today_work_recommendation(
 def route_today_work(
     student_id: str,
     payload: WorkTodayRouteRequest,
-    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
     db=Depends(get_db),
 ) -> WorkTodayRouteResponse:
     try:
@@ -160,7 +177,7 @@ def route_today_work(
 
 @router.get("/projection/status", response_model=WorkProjectionStatusResponse)
 def get_work_projection_status(
-    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
 ) -> WorkProjectionStatusResponse:
     status_payload = work_state_projector.get_projection_status(auth_context.tenant.id)
     if status_payload["lastProjectedAt"] is not None and not isinstance(status_payload["lastProjectedAt"], str):
@@ -174,7 +191,7 @@ def get_work_projection_status(
 @router.get("/projection/jobs", response_model=WorkProjectionJobsResponse)
 def list_work_projection_jobs(
     limit: int = Query(default=20, ge=1, le=100),
-    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
 ) -> WorkProjectionJobsResponse:
     items = work_state_projector.list_projection_jobs(auth_context.tenant.id, limit=limit)
     for item in items:
@@ -185,7 +202,7 @@ def list_work_projection_jobs(
 @router.get("/projection/jobs/{job_id}", response_model=WorkProjectionJobResponse)
 def get_work_projection_job(
     job_id: str,
-    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
 ) -> WorkProjectionJobResponse:
     item = work_state_projector.get_projection_job(auth_context.tenant.id, job_id=job_id)
     if item is None:
@@ -201,7 +218,7 @@ def rebuild_work_projection(
     reset: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
     cursor: str | None = Query(default=None),
-    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
 ) -> WorkProjectionRebuildResponse:
     if reset:
         work_state_projector.reset_tenant_projection(auth_context.tenant.id)
@@ -224,7 +241,7 @@ def rebuild_all_work_projection(
     background_tasks: BackgroundTasks,
     reset: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
-    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
 ) -> WorkProjectionRebuildResponse:
     job_id = work_state_projector.create_projection_job(auth_context.tenant.id, reset=reset, limit=limit)
     background_tasks.add_task(_run_projection_job, str(auth_context.tenant.id), job_id)
@@ -242,7 +259,7 @@ def rebuild_all_work_projection(
 def retry_work_projection_job(
     job_id: str,
     background_tasks: BackgroundTasks,
-    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
 ) -> WorkProjectionRebuildResponse:
     retried_job_id = work_state_projector.retry_projection_job(auth_context.tenant.id, job_id=job_id)
     if retried_job_id is None:
@@ -263,7 +280,7 @@ def retry_work_projection_job(
 @router.post("/projection/jobs/{job_id}/cancel", response_model=WorkProjectionJobResponse)
 def cancel_work_projection_job(
     job_id: str,
-    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
 ) -> WorkProjectionJobResponse:
     item = work_state_projector.cancel_projection_job(auth_context.tenant.id, job_id=job_id)
     if item is None:

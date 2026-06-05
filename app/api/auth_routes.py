@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Header, HTTPException, status
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -28,6 +29,11 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> AuthChallenge
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.") from exc
     except CognitoAuthError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except OperationalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database is unavailable. Check local network/VPN or allowlist access to the configured Postgres host.",
+        ) from exc
 
 
 @router.post("/complete-new-password", response_model=AuthChallengeResponse | AuthSuccessResponse, response_model_exclude_none=True)
@@ -41,6 +47,11 @@ def complete_new_password(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.") from exc
     except CognitoAuthError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except OperationalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database is unavailable. Check local network/VPN or allowlist access to the configured Postgres host.",
+        ) from exc
 
 
 @router.post("/change-password", response_model=ChangePasswordResponse)

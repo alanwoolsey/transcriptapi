@@ -151,10 +151,18 @@ Then run:
 terraform apply
 ```
 
-This changes three things:
+This creates a temporary public clone for local development and opens PostgreSQL only to your listed CIDRs. After apply, use this output in your local `.env` as `DATABASE_HOST`:
 
-- the RDS subnet group switches from private subnets to public subnets
-- `publicly_accessible` is enabled on the RDS instance
+```powershell
+terraform output -raw local_database_public_endpoint
+```
+
+This local endpoint is separate from the deployed application database endpoint. Deployed ECS tasks use the private primary database endpoint and security-group access inside the VPC.
+
+This local access mode changes three things:
+
+- a temporary RDS clone is created in public subnets
+- `publicly_accessible` is enabled on that clone
 - the DB security group allows `5432` only from the CIDRs you listed
 
 When you are done testing, set:

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pydantic import BaseModel, Field
 
 from app.models.operations_models import AgentRunActionItemResponse, AgentRunStatusResponse
@@ -19,6 +21,15 @@ class ChecklistItemResponse(BaseModel):
     updatedBy: dict[str, str] | None = None
 
 
+class StudentChecklistResponse(BaseModel):
+    studentId: str
+    population: str
+    completionPercent: int
+    oneItemAway: bool
+    status: str
+    items: list[ChecklistItemResponse] = Field(default_factory=list)
+
+
 class ChecklistStatusUpdateRequest(BaseModel):
     status: str
 
@@ -34,6 +45,8 @@ class StudentReadinessResponse(BaseModel):
     reasonLabel: str
     blockingItemCount: int
     trustBlocked: bool
+    tone: str | None = None
+    blockers: list[WorkBlockingItem] = Field(default_factory=list)
     computedAt: str
 
 
@@ -70,6 +83,7 @@ class WorkChecklistSummary(BaseModel):
     completedCount: int
     missingCount: int
     needsReviewCount: int
+    blockerCount: int = 0
     oneItemAway: bool
 
 
@@ -116,12 +130,22 @@ class WorkTodayItemResponse(BaseModel):
     id: str
     studentId: str
     studentName: str
+    population: str | None = None
+    stage: str | None = None
+    completionPercent: int | None = None
     section: str
     priority: str
     priorityScore: int | None = None
     owner: WorkItemOwner
     reasonToAct: WorkItemReason
     suggestedAction: WorkItemReason
+    readiness: dict | None = None
+    blockingItems: list[WorkBlockingItem] = Field(default_factory=list)
+    checklistSummary: WorkChecklistSummary | None = None
+    program: str | None = None
+    institutionGoal: str | None = None
+    risk: str | None = None
+    lastActivity: str | None = None
     currentOwnerAgent: str | None = None
     currentStage: str | None = None
     recommendedAgent: str | None = None

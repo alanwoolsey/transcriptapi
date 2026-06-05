@@ -34,7 +34,7 @@ output "certificate_arn" {
 }
 
 output "database_endpoint" {
-  description = "RDS PostgreSQL endpoint hostname."
+  description = "Application RDS PostgreSQL endpoint hostname used by deployed ECS tasks."
   value       = local.active_db_host
 }
 
@@ -44,7 +44,7 @@ output "database_port" {
 }
 
 output "database_publicly_accessible" {
-  description = "Whether the RDS instance is publicly reachable."
+  description = "Whether the application RDS endpoint is publicly reachable."
   value       = local.active_db_public
 }
 
@@ -74,12 +74,17 @@ output "db_bastion_ssm_port_forward_command" {
 }
 
 output "database_private_endpoint" {
-  description = "Original private RDS endpoint hostname."
+  description = "Private primary RDS endpoint hostname."
   value       = aws_db_instance.postgres.address
 }
 
+output "local_database_public_endpoint" {
+  description = "Public RDS clone endpoint hostname for local development when db_enable_local_access is true."
+  value       = try(aws_db_instance.postgres_public[0].address, null)
+}
+
 output "database_public_clone_endpoint" {
-  description = "Public clone RDS endpoint hostname when direct local access is enabled."
+  description = "Deprecated alias for local_database_public_endpoint."
   value       = try(aws_db_instance.postgres_public[0].address, null)
 }
 

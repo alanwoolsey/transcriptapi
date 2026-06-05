@@ -297,4 +297,6 @@ class RBACService:
         if not membership_role:
             return None
         normalized = membership_role.strip().lower()
+        if normalized in STARTER_ROLES:
+            return normalized
         return MEMBERSHIP_ROLE_FALLBACKS.get(normalized)

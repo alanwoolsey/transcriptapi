@@ -36,10 +36,10 @@ locals {
   alb_name                 = trimsuffix(substr("${local.name_prefix}-alb", 0, 32), "-")
   target_group_name        = trimsuffix(substr("${local.name_prefix}-tg", 0, 32), "-")
   db_secret_name           = "${local.name_prefix}/database"
-  active_db_host           = var.db_enable_local_access ? aws_db_instance.postgres_public[0].address : aws_db_instance.postgres.address
-  active_db_port           = var.db_enable_local_access ? aws_db_instance.postgres_public[0].port : aws_db_instance.postgres.port
-  active_db_name           = var.db_enable_local_access ? aws_db_instance.postgres_public[0].db_name : aws_db_instance.postgres.db_name
-  active_db_public         = var.db_enable_local_access
+  active_db_host           = aws_db_instance.postgres.address
+  active_db_port           = aws_db_instance.postgres.port
+  active_db_name           = aws_db_instance.postgres.db_name
+  active_db_public         = false
 }
 
 resource "aws_vpc" "this" {
@@ -413,8 +413,8 @@ resource "aws_db_instance" "postgres_public" {
   auto_minor_version_upgrade   = true
   apply_immediately            = true
   copy_tags_to_snapshot        = true
-  deletion_protection          = var.db_deletion_protection
-  skip_final_snapshot          = var.db_skip_final_snapshot
+  deletion_protection          = var.db_public_clone_deletion_protection
+  skip_final_snapshot          = var.db_public_clone_skip_final_snapshot
   backup_retention_period      = var.db_backup_retention_period
   performance_insights_enabled = false
 

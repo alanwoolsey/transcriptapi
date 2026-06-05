@@ -16,6 +16,7 @@ def _build_test_app() -> FastAPI:
         yield SimpleNamespace(
             tenant=SimpleNamespace(id=uuid4()),
             user=SimpleNamespace(id=uuid4(), display_name="Taylor Reed"),
+            authorization=SimpleNamespace(can=lambda permission: True),
         )
 
     def override_db():
@@ -36,27 +37,34 @@ def test_get_student_checklist_returns_payload(monkeypatch):
     monkeypatch.setattr(
         student_routes.admissions_ops_service,
         "get_student_checklist",
-        lambda tenant_id, student_id: [
-            {
-                "id": "chk-1",
-                "code": "official_transcript",
-                "label": "Official transcript",
-                "required": True,
-                "status": "needs_review",
-                "done": False,
-                "receivedAt": "2026-04-19T12:10:00Z",
-                "completedAt": None,
-                "sourceDocumentId": "doc-1",
-                "sourceConfidence": 0.93,
-            }
-        ],
+        lambda tenant_id, student_id: {
+            "studentId": student_id,
+            "population": "transfer",
+            "completionPercent": 83,
+            "oneItemAway": True,
+            "status": "incomplete",
+            "items": [
+                {
+                    "id": "chk-1",
+                    "code": "official_transcript",
+                    "label": "Official transcript",
+                    "required": True,
+                    "status": "needs_review",
+                    "done": False,
+                    "receivedAt": "2026-04-19T12:10:00Z",
+                    "completedAt": None,
+                    "sourceDocumentId": "doc-1",
+                    "sourceConfidence": 0.93,
+                }
+            ],
+        },
     )
 
     client = TestClient(_build_test_app())
     response = client.get("/api/v1/students/student-1/checklist")
 
     assert response.status_code == 200
-    assert response.json()[0]["status"] == "needs_review"
+    assert response.json()["items"][0]["status"] == "needs_review"
 
 
 def test_update_checklist_item_status_returns_updated_checklist(monkeypatch):
@@ -65,27 +73,34 @@ def test_update_checklist_item_status_returns_updated_checklist(monkeypatch):
     monkeypatch.setattr(
         student_routes.admissions_ops_service,
         "update_checklist_item_status",
-        lambda **kwargs: [
-            {
-                "id": kwargs["item_id"],
-                "code": "official_transcript",
-                "label": "Official transcript",
-                "required": True,
-                "status": "complete",
-                "done": True,
-                "receivedAt": "2026-04-19T12:10:00Z",
-                "completedAt": "2026-04-20T12:10:00Z",
-                "sourceDocumentId": "doc-1",
-                "sourceConfidence": 0.93,
-            }
-        ],
+        lambda **kwargs: {
+            "studentId": kwargs["student_id"],
+            "population": "transfer",
+            "completionPercent": 100,
+            "oneItemAway": False,
+            "status": "complete",
+            "items": [
+                {
+                    "id": kwargs["item_id"],
+                    "code": "official_transcript",
+                    "label": "Official transcript",
+                    "required": True,
+                    "status": "complete",
+                    "done": True,
+                    "receivedAt": "2026-04-19T12:10:00Z",
+                    "completedAt": "2026-04-20T12:10:00Z",
+                    "sourceDocumentId": "doc-1",
+                    "sourceConfidence": 0.93,
+                }
+            ],
+        },
     )
 
     client = TestClient(_build_test_app())
     response = client.post("/api/v1/students/student-1/checklist/items/item-1/status", json={"status": "complete"})
 
     assert response.status_code == 200
-    assert response.json()[0]["status"] == "complete"
+    assert response.json()["items"][0]["status"] == "complete"
 
 
 def test_get_student_readiness_returns_payload(monkeypatch):
@@ -184,7 +199,7 @@ def test_get_today_work_returns_payload(monkeypatch):
     monkeypatch.setattr(
         work_routes.admissions_ops_service,
         "get_today_work",
-        lambda tenant_id, limit=25: {
+        lambda tenant_id, **kwargs: {
             "items": [
                 {
                     "id": "work_123",
@@ -768,20 +783,27 @@ def test_link_document_to_checklist_item_returns_updated_checklist(monkeypatch):
     monkeypatch.setattr(
         document_routes.admissions_ops_service,
         "link_document_to_checklist_item",
-        lambda **kwargs: [
-            {
-                "id": "chk-2",
-                "code": "official_transcript",
-                "label": "Official transcript",
-                "required": True,
-                "status": "needs_review",
-                "done": False,
-                "receivedAt": "2026-04-19T12:10:00Z",
-                "completedAt": None,
-                "sourceDocumentId": "doc-1",
-                "sourceConfidence": 0.93,
-            }
-        ],
+        lambda **kwargs: {
+            "studentId": kwargs["payload"].studentId,
+            "population": "transfer",
+            "completionPercent": 83,
+            "oneItemAway": True,
+            "status": "incomplete",
+            "items": [
+                {
+                    "id": "chk-2",
+                    "code": "official_transcript",
+                    "label": "Official transcript",
+                    "required": True,
+                    "status": "needs_review",
+                    "done": False,
+                    "receivedAt": "2026-04-19T12:10:00Z",
+                    "completedAt": None,
+                    "sourceDocumentId": "doc-1",
+                    "sourceConfidence": 0.93,
+                }
+            ],
+        },
     )
 
     client = TestClient(_build_test_app())
@@ -796,7 +818,7 @@ def test_link_document_to_checklist_item_returns_updated_checklist(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.json()[0]["sourceDocumentId"] == "doc-1"
+    assert response.json()["items"][0]["sourceDocumentId"] == "doc-1"
 
 
 def test_get_document_exceptions_returns_payload(monkeypatch):

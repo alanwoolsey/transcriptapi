@@ -15,7 +15,8 @@ def get_engine():
     database_url = get_database_url()
     if not database_url:
         raise RuntimeError("Database is not configured.")
-    return create_engine(database_url, pool_pre_ping=True)
+    connect_args = {"connect_timeout": 5} if database_url.startswith("postgresql") else {}
+    return create_engine(database_url, pool_pre_ping=True, connect_args=connect_args)
 
 
 @lru_cache(maxsize=1)

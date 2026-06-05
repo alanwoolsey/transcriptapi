@@ -363,7 +363,6 @@ class WorkStateProjector:
         if state is None:
             state = StudentWorkState(tenant_id=tenant_id, student_id=student_id)
             session.add(state)
-            session.flush()
         state.student_identifier = item.studentId
         state.student_name = item.studentName
         state.population = item.population

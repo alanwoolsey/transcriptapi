@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, String, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import AppUser, DocumentUpload, Institution, Program, Student, Transcript, TranscriptDemographics, TranscriptParseRun
@@ -605,7 +605,13 @@ class Student360Service:
                 Student.first_name.ilike(pattern),
                 Student.last_name.ilike(pattern),
                 Student.preferred_name.ilike(pattern),
+                Student.external_student_id.ilike(pattern),
+                cast(Student.id, String).ilike(pattern),
                 Student.email.ilike(pattern),
+                Student.phone.ilike(pattern),
+                Student.city.ilike(pattern),
+                Student.state.ilike(pattern),
+                Student.country.ilike(pattern),
                 Student.current_stage.ilike(pattern),
                 Student.risk_level.ilike(pattern),
                 Program.name.ilike(pattern),
@@ -620,12 +626,15 @@ class Student360Service:
         haystack = " ".join(
             [
                 record.name,
-                record.program,
+                record.program.name if isinstance(record.program, StudentProgramSummary) else record.program,
                 record.institutionGoal,
                 record.advisor,
                 record.risk,
                 record.stage,
                 record.summary,
+                record.nextBestAction,
+                " ".join(record.tags),
+                record.id,
             ]
         ).lower()
         return q.strip().lower() in haystack
