@@ -61,6 +61,7 @@ def test_resolve_profile_accepts_direct_membership_role_key(monkeypatch):
     assert "admissions_counselor" in profile.roles
     assert profile.can("view_student_360")
     assert profile.can("edit_checklist")
+    assert profile.can("view_sensitive_docs")
 
 
 def test_resolve_profile_uses_explicit_assignment_rows(monkeypatch):

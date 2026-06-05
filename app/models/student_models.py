@@ -20,6 +20,19 @@ class StudentProgramSummary(BaseModel):
     name: str
 
 
+class StudentOwnerSummary(BaseModel):
+    id: str | None = None
+    name: str
+    email: str | None = None
+
+
+class StudentReadinessSummary(BaseModel):
+    state: str
+    label: str
+    reason: str
+    tone: str | None = None
+
+
 class StudentTimelineStep(BaseModel):
     label: str
     time: str
@@ -67,16 +80,25 @@ class StudentRecommendation(BaseModel):
 
 class Student360ListRecord(BaseModel):
     id: str
+    studentId: str | None = None
     name: str
     preferredName: str | None = None
     email: str | None = None
     phone: str | None = None
     program: str | StudentProgramSummary
+    population: str | None = None
     studentType: str | None = None
+    source: str | None = None
+    sourceCategory: str | None = None
+    campaign: str | None = None
+    termInterest: str | None = None
     institutionGoal: str
     stage: str
     risk: str
+    owner: StudentOwnerSummary | None = None
+    assignedOwner: StudentOwnerSummary | None = None
     advisor: str
+    readiness: StudentReadinessSummary | None = None
     city: str | None = None
     fitScore: int
     depositLikelihood: int
@@ -102,3 +124,40 @@ class Student360Record(Student360ListRecord):
     handoff: dict[str, Any] | None = None
     trustSummary: dict[str, Any] | None = None
     decisionSummary: dict[str, Any] | None = None
+
+
+class Student360ListResponse(BaseModel):
+    students: list[Student360ListRecord] = Field(default_factory=list)
+    total: int
+
+
+class Student360DetailResponse(BaseModel):
+    student: Student360Record
+
+
+class StudentTimelineActor(BaseModel):
+    id: str | None = None
+    name: str
+    type: str = "system"
+
+
+class StudentTimelineEntity(BaseModel):
+    type: str
+    id: str | None = None
+
+
+class StudentTimelineEvent(BaseModel):
+    id: str
+    type: str
+    title: str
+    description: str | None = None
+    occurredAt: str
+    actor: StudentTimelineActor | None = None
+    source: str
+    status: str | None = None
+    entity: StudentTimelineEntity | None = None
+    sensitivityTier: str = "standard"
+
+
+class StudentTimelineResponse(BaseModel):
+    events: list[StudentTimelineEvent] = Field(default_factory=list)

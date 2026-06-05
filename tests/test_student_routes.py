@@ -30,25 +30,28 @@ def test_list_students_returns_records(monkeypatch):
     monkeypatch.setattr(
         student_routes.student_service,
         "list_students",
-        lambda tenant_id, q=None: [
-            {
-                "id": "student-1",
-                "name": "Hunter Haymore",
-                "program": "Transcript intake",
-                "institutionGoal": "Grantsville High",
-                "stage": "Decision-ready",
-                "risk": "Low",
-                "fitScore": 86,
-                "depositLikelihood": 61,
-                "summary": "Latest transcript parsed from Grantsville High. Outcome draft prepared for review.",
-                "gpa": 0.0,
-                "creditsAccepted": 0,
-                "transcriptsCount": 1,
-                "advisor": "Unassigned",
-                "tags": ["Transcript intake", "Low", "Decision-ready"],
-                "nextBestAction": "Open the student record and review the latest transcript outcome.",
-            }
-        ],
+        lambda tenant_id, q=None, **kwargs: {
+            "students": [
+                {
+                    "id": "student-1",
+                    "name": "Hunter Haymore",
+                    "program": "Transcript intake",
+                    "institutionGoal": "Grantsville High",
+                    "stage": "Decision-ready",
+                    "risk": "Low",
+                    "fitScore": 86,
+                    "depositLikelihood": 61,
+                    "summary": "Latest transcript parsed from Grantsville High. Outcome draft prepared for review.",
+                    "gpa": 0.0,
+                    "creditsAccepted": 0,
+                    "transcriptsCount": 1,
+                    "advisor": "Unassigned",
+                    "tags": ["Transcript intake", "Low", "Decision-ready"],
+                    "nextBestAction": "Open the student record and review the latest transcript outcome.",
+                }
+            ],
+            "total": 1,
+        },
     )
 
     client = TestClient(_build_test_app())
@@ -56,10 +59,10 @@ def test_list_students_returns_records(monkeypatch):
 
     assert response.status_code == 200
     payload = response.json()
-    assert len(payload) == 1
-    assert payload[0]["name"] == "Hunter Haymore"
-    assert payload[0]["institutionGoal"] == "Grantsville High"
-    assert "transcripts" not in payload[0]
+    assert payload["total"] == 1
+    assert payload["students"][0]["name"] == "Hunter Haymore"
+    assert payload["students"][0]["institutionGoal"] == "Grantsville High"
+    assert "transcripts" not in payload["students"][0]
 
 
 def test_list_students_passes_search_query(monkeypatch):
@@ -67,10 +70,11 @@ def test_list_students_passes_search_query(monkeypatch):
 
     captured = {}
 
-    def fake_list_students(tenant_id, q=None):
+    def fake_list_students(tenant_id, q=None, **kwargs):
         captured["tenant_id"] = tenant_id
         captured["q"] = q
-        return []
+        captured.update(kwargs)
+        return {"students": [], "total": 0}
 
     monkeypatch.setattr(student_routes.student_service, "list_students", fake_list_students)
 
@@ -79,6 +83,7 @@ def test_list_students_passes_search_query(monkeypatch):
 
     assert response.status_code == 200
     assert captured["q"] == "hunter"
+    assert captured["limit"] == 50
 
 
 def test_get_student_returns_detail_record(monkeypatch):
@@ -86,7 +91,7 @@ def test_get_student_returns_detail_record(monkeypatch):
 
     captured = {}
 
-    def fake_get_student(tenant_id, student_id):
+    def fake_get_student(tenant_id, student_id, authorization=None):
         captured["tenant_id"] = tenant_id
         captured["student_id"] = student_id
         return {
@@ -127,20 +132,55 @@ def test_get_student_returns_detail_record(monkeypatch):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["id"] == "student-1"
-    assert payload["recommendation"]["nextBestAction"] == payload["nextBestAction"]
+    assert payload["student"]["id"] == "student-1"
+    assert payload["student"]["recommendation"]["nextBestAction"] == payload["student"]["nextBestAction"]
     assert captured["student_id"] == "student-1"
 
 
 def test_get_student_returns_404_when_missing(monkeypatch):
     from app.api import student_routes
 
-    monkeypatch.setattr(student_routes.student_service, "get_student", lambda tenant_id, student_id: None)
+    monkeypatch.setattr(student_routes.student_service, "get_student", lambda tenant_id, student_id, authorization=None: None)
 
     client = TestClient(_build_test_app())
     response = client.get("/api/v1/students/missing-student")
 
     assert response.status_code == 404
+
+
+def test_get_student_timeline_returns_events(monkeypatch):
+    from app.api import student_routes
+
+    captured = {}
+
+    def fake_get_timeline(tenant_id, student_id, authorization=None):
+        captured["student_id"] = student_id
+        return {
+            "events": [
+                {
+                    "id": "evt-1",
+                    "type": "checklist",
+                    "title": "Official transcript marked complete",
+                    "description": "Updated checklist item.",
+                    "occurredAt": "2026-06-04T15:30:00Z",
+                    "actor": {"id": "usr-1", "name": "Elian Brooks", "type": "user"},
+                    "source": "checklist",
+                    "status": "complete",
+                    "entity": {"type": "student_checklist_item", "id": "chk-1"},
+                    "sensitivityTier": "standard",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(student_routes.student_service, "get_student_timeline", fake_get_timeline)
+
+    client = TestClient(_build_test_app())
+    response = client.get("/api/v1/students/student-1/timeline")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["events"][0]["type"] == "checklist"
+    assert captured["student_id"] == "student-1"
 
 
 def test_student_identifier_variants_strip_leading_zeros():

@@ -64,7 +64,16 @@ STARTER_PERMISSIONS: list[dict[str, str]] = [
 STARTER_ROLES: dict[str, dict[str, object]] = {
     "admissions_counselor": {
         "name": "Admissions Counselor",
-        "permissions": {"view_student_360", "view_checklist", "edit_checklist", "view_document_metadata", "view_deposit_status", "view_melt_risk", "view_dashboards"},
+        "permissions": {
+            "view_student_360",
+            "view_checklist",
+            "edit_checklist",
+            "view_document_metadata",
+            "view_sensitive_docs",
+            "view_deposit_status",
+            "view_melt_risk",
+            "view_dashboards",
+        },
         "sensitivities": {SENSITIVITY_BASIC_PROFILE, SENSITIVITY_ACADEMIC_RECORD},
     },
     "admissions_processor": {
