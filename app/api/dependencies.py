@@ -32,12 +32,9 @@ def get_authorization_token(authorization: str | None = Header(default=None, ali
     return token.strip()
 
 
-def get_tenant_id(x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id")) -> UUID:
+def get_tenant_id(x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id")) -> UUID | None:
     if not x_tenant_id or not x_tenant_id.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="X-Tenant-Id header is required.",
-        )
+        return None
     try:
         return UUID(x_tenant_id.strip())
     except ValueError as exc:
@@ -45,7 +42,7 @@ def get_tenant_id(x_tenant_id: str | None = Header(default=None, alias="X-Tenant
 
 
 def get_current_tenant_context(
-    tenant_id: UUID = Depends(get_tenant_id),
+    tenant_id: UUID | None = Depends(get_tenant_id),
     token: str = Depends(get_authorization_token),
 ) -> AuthenticatedTenantContext:
     try:
@@ -57,26 +54,31 @@ def get_current_tenant_context(
     username = claims.get("username")
     session_factory = get_session_factory()
     with session_factory() as db:
+        filters = [
+            Tenant.status == "active",
+            AppUser.tenant_id == Tenant.id,
+            AppUser.is_active.is_(True),
+            TenantUserMembership.status == "active",
+            or_(
+                AppUser.cognito_sub == subject,
+                AppUser.email == username,
+            ),
+        ]
+        if tenant_id is not None:
+            filters.append(Tenant.id == tenant_id)
+
         stmt = (
             select(AppUser, Tenant, TenantUserMembership.role)
             .join(TenantUserMembership, TenantUserMembership.user_id == AppUser.id)
             .join(Tenant, Tenant.id == TenantUserMembership.tenant_id)
-            .where(
-                Tenant.id == tenant_id,
-                Tenant.status == "active",
-                AppUser.tenant_id == tenant_id,
-                AppUser.is_active.is_(True),
-                TenantUserMembership.status == "active",
-                or_(
-                    AppUser.cognito_sub == subject,
-                    AppUser.email == username,
-                ),
-            )
+            .where(*filters)
+            .order_by(TenantUserMembership.is_default.desc(), TenantUserMembership.created_at.asc())
             .limit(1)
         )
         row = db.execute(stmt).first()
         if row is None:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User is not authorized for this tenant.")
+            detail = "User is not authorized for this tenant." if tenant_id is not None else "User has no active tenant membership."
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
         if len(row) == 2:
             user, tenant = row
             membership_role = None

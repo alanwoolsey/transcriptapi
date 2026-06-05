@@ -15,7 +15,11 @@ def test_get_authorization_token_requires_bearer_scheme():
     assert exc.value.detail == "Bearer token is required."
 
 
-def test_get_tenant_id_requires_uuid():
+def test_get_tenant_id_allows_missing_header_for_default_membership():
+    assert dependencies.get_tenant_id(None) is None
+
+
+def test_get_tenant_id_requires_uuid_when_present():
     with pytest.raises(HTTPException) as exc:
         dependencies.get_tenant_id("not-a-uuid")
 
@@ -101,6 +105,44 @@ def test_get_current_tenant_context_returns_user_and_tenant(monkeypatch):
     assert context.user is user
     assert context.tenant is tenant
     assert context.claims == claims
+    assert context.authorization is authorization
+
+
+def test_get_current_tenant_context_uses_default_membership_without_tenant_header(monkeypatch):
+    tenant_id = uuid4()
+    claims = {"sub": "sub-123", "username": "user@example.com"}
+    user = SimpleNamespace(id=uuid4(), email="user@example.com")
+    tenant = SimpleNamespace(id=tenant_id, slug="test")
+    authorization = SimpleNamespace(can=lambda code: True, can_access_tier=lambda tier: True)
+
+    monkeypatch.setattr(dependencies.verifier, "verify", lambda token: claims)
+    monkeypatch.setattr(
+        dependencies.rbac_service,
+        "resolve_profile",
+        lambda db, tenant_id, user_id, membership_role: authorization,
+    )
+
+    class FakeResult:
+        def first(self):
+            return (user, tenant, "admissions_counselor")
+
+    class FakeDb:
+        def execute(self, stmt):
+            compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            assert "tenant_user_memberships.is_default DESC" in compiled
+            return FakeResult()
+        def expunge(self, value):
+            return None
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(dependencies, "get_session_factory", lambda: FakeDb)
+    context = dependencies.get_current_tenant_context(tenant_id=None, token="good-token")
+
+    assert context.user is user
+    assert context.tenant is tenant
     assert context.authorization is authorization
 
 
