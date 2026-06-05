@@ -62,6 +62,7 @@ from app.models.ops_models import (
     WorkTodayResponse,
 )
 from app.services.agent_run_service import AgentRunService
+from app.services.prospect_service import ProspectService
 from app.services.work_state_projector import WorkStateProjector
 
 
@@ -88,6 +89,7 @@ class AdmissionsOpsService:
         self.session_factory = session_factory or get_session_factory
         self.work_state_projector = WorkStateProjector(session_factory=self.session_factory)
         self.agent_run_service = AgentRunService(session_factory=self.session_factory)
+        self.prospect_service = ProspectService(session_factory=self.session_factory)
 
     VALID_CHECKLIST_STATUSES = {
         "not_started",
@@ -281,8 +283,11 @@ class AdmissionsOpsService:
                 )
                 for row in rows[offset : offset + limit]
             ]
+            if offset == 0:
+                prospect_items = self.prospect_service.get_today_work_items(tenant_id, limit=limit)
+                items = [*prospect_items, *items][:limit]
             session.commit()
-            return WorkTodayResponse(items=items, total=len(rows))
+            return WorkTodayResponse(items=items, total=len(rows) + len(self.prospect_service.get_today_work_items(tenant_id, limit=500)))
 
     def get_today_work_board(self, tenant_id: UUID, *, limit: int = 50) -> WorkTodayBoardResponse:
         self.work_state_projector.ensure_tenant_projection(tenant_id)
@@ -297,9 +302,11 @@ class AdmissionsOpsService:
                 )
                 for row in rows[:limit]
             ]
+            prospect_items = self.prospect_service.get_today_work_items(tenant_id, limit=limit)
+            items = [*prospect_items, *items][:limit]
             groups = self._group_today_work_items(items)
             session.commit()
-            return WorkTodayBoardResponse(groups=groups, total=len(rows))
+            return WorkTodayBoardResponse(groups=groups, total=len(rows) + len(prospect_items))
 
     def orchestrate_today_work(
         self,
@@ -1481,6 +1488,10 @@ class AdmissionsOpsService:
 
     def _group_today_work_items(self, items: list[WorkTodayItemResponse]) -> list[WorkTodayGroupResponse]:
         group_order = [
+            "new_inquiries",
+            "no_first_touch",
+            "started_not_submitted",
+            "duplicate_candidate",
             "trust_blocked",
             "one_item_away",
             "document_blocked",
@@ -1499,6 +1510,10 @@ class AdmissionsOpsService:
             "incomplete_applicants": "Incomplete Applicants",
             "stalled_applicants": "Stalled Applicants",
             "general_follow_up": "General Follow-Up",
+            "new_inquiries": "New Inquiries",
+            "no_first_touch": "No First Touch",
+            "started_not_submitted": "Started Not Submitted",
+            "duplicate_candidate": "Duplicate Candidate",
         }
         grouped_items: dict[str, list[WorkTodayItemResponse]] = {key: [] for key in group_order}
         for item in items:
@@ -1583,6 +1598,18 @@ class AdmissionsOpsService:
                 nextAgent="document_agent",
                 reason="Document intake or recovery work is the next required step.",
                 actionLabel="Route to document recovery",
+            )
+        if group_key in {"new_inquiries", "no_first_touch", "started_not_submitted"}:
+            return WorkTodayGroupRouteHint(
+                nextAgent="decision_agent",
+                reason="Prospect follow-up is ready for admissions counselor action.",
+                actionLabel="Route to counselor follow-up",
+            )
+        if group_key == "duplicate_candidate":
+            return WorkTodayGroupRouteHint(
+                nextAgent="trust_agent",
+                reason="Potential duplicate prospect records need resolution before conversion.",
+                actionLabel="Resolve duplicate",
             )
         fallback_agent = next(
             (item.recommendedAgent for item in members if item.recommendedAgent),

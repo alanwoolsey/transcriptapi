@@ -11,6 +11,7 @@ from app.api.dashboard_routes import router as dashboard_router
 from app.api.document_routes import router as document_router
 from app.api.me_routes import router as me_router
 from app.api.operations_routes import router as operations_router
+from app.api.prospect_routes import router as prospect_router
 from app.api.student_routes import router as student_router
 from app.api.trust_routes import router as trust_router
 from app.api.routes import router as transcript_router
@@ -65,6 +66,7 @@ app.include_router(dashboard_router, prefix="/api/v1")
 app.include_router(document_router, prefix="/api/v1")
 app.include_router(me_router, prefix="/api/v1")
 app.include_router(operations_router, prefix="/api/v1")
+app.include_router(prospect_router, prefix="/api/v1")
 app.include_router(student_router, prefix="/api/v1")
 app.include_router(trust_router, prefix="/api/v1")
 app.include_router(transcript_router, prefix="/api/v1")
