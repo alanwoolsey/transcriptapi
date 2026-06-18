@@ -3,7 +3,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile, status
 
-from app.api.dependencies import AuthenticatedTenantContext, get_current_tenant_context, require_permission
+from app.api.dependencies import AuthenticatedTenantContext, get_current_tenant_context, require_any_permission, require_permission
 from app.models.operations_models import (
     ActionResponse,
     AdminChecklistTemplatePayload,
@@ -531,28 +531,28 @@ def reassign_admin_user(
 
 @router.get("/admin/roles", response_model=AdminRolesResponse)
 def get_admin_roles(
-    auth_context: AuthenticatedTenantContext = Depends(require_permission("admin_roles_view")),
+    auth_context: AuthenticatedTenantContext = Depends(require_any_permission("admin_roles_view", "admin_users_create", "admin_users_update")),
 ) -> AdminRolesResponse:
     return operations_service.get_admin_roles()
 
 
 @router.get("/admin/permissions", response_model=AdminPermissionsResponse)
 def get_admin_permissions(
-    auth_context: AuthenticatedTenantContext = Depends(require_permission("admin_roles_view")),
+    auth_context: AuthenticatedTenantContext = Depends(require_any_permission("admin_roles_view", "admin_users_create", "admin_users_update")),
 ) -> AdminPermissionsResponse:
     return operations_service.get_admin_permissions()
 
 
 @router.get("/admin/sensitivity-tiers", response_model=SensitivityTiersResponse)
 def get_admin_sensitivity_tiers(
-    auth_context: AuthenticatedTenantContext = Depends(require_permission("admin_roles_view")),
+    auth_context: AuthenticatedTenantContext = Depends(require_any_permission("admin_roles_view", "admin_users_create", "admin_users_update")),
 ) -> SensitivityTiersResponse:
     return operations_service.get_sensitivity_tiers()
 
 
 @router.get("/admin/scope-options", response_model=AdminScopeOptionsResponse)
 def get_admin_scope_options(
-    auth_context: AuthenticatedTenantContext = Depends(require_permission("admin_scopes_manage")),
+    auth_context: AuthenticatedTenantContext = Depends(require_any_permission("admin_scopes_manage", "admin_users_create", "admin_users_update")),
 ) -> AdminScopeOptionsResponse:
     return operations_service.get_admin_scope_options(auth_context.tenant.id)
 

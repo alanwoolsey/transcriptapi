@@ -448,6 +448,41 @@ resource "aws_cloudwatch_log_group" "service" {
   tags = local.common_tags
 }
 
+resource "aws_s3_bucket" "document_storage" {
+  bucket = "${var.project_name}-${var.service_name}-docs-${data.aws_caller_identity.current.account_id}"
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-document-storage"
+  })
+}
+
+resource "aws_s3_bucket_public_access_block" "document_storage" {
+  bucket = aws_s3_bucket.document_storage.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "document_storage" {
+  bucket = aws_s3_bucket.document_storage.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_versioning" "document_storage" {
+  bucket = aws_s3_bucket.document_storage.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 resource "aws_ecr_repository" "service" {
   name                 = local.name_prefix
   image_tag_mutability = "MUTABLE"
@@ -569,6 +604,20 @@ resource "aws_iam_role_policy" "task_app_access" {
         Effect   = "Allow"
         Action   = "textract:*"
         Resource = "*"
+      },
+      {
+        Sid    = "DocumentStorageAccess"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.document_storage.arn,
+          "${aws_s3_bucket.document_storage.arn}/*"
+        ]
       }
     ]
   })
@@ -727,6 +776,8 @@ resource "aws_ecs_task_definition" "service" {
         { name = "USE_BEDROCK", value = tostring(var.use_bedrock) },
         { name = "USE_TEXTRACT", value = tostring(var.use_textract) },
         { name = "BEDROCK_MODEL_ID", value = var.bedrock_model_id },
+        { name = "DOCUMENT_STORAGE_BACKEND", value = "s3" },
+        { name = "DOCUMENT_STORAGE_BUCKET", value = aws_s3_bucket.document_storage.bucket },
         { name = "UPLOAD_BATCH_MAX_WORKERS", value = tostring(var.upload_batch_max_workers) },
         { name = "EXTRACTION_SERVICE_URL", value = var.extraction_service_url },
         { name = "RUN_DB_MIGRATIONS_ON_STARTUP", value = "true" }

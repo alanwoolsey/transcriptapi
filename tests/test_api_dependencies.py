@@ -120,6 +120,22 @@ def test_require_permission_rejects_missing_permission():
     assert exc.value.status_code == 403
 
 
+def test_require_any_permission_accepts_one_matching_permission():
+    dependency = dependencies.require_any_permission("admin_roles_view", "admin_users_create")
+    context = SimpleNamespace(authorization=SimpleNamespace(can=lambda code: code == "admin_users_create"))
+
+    assert dependency(auth_context=context) is context
+
+
+def test_require_any_permission_rejects_when_none_match():
+    dependency = dependencies.require_any_permission("admin_roles_view", "admin_users_create")
+
+    with pytest.raises(HTTPException) as exc:
+        dependency(auth_context=SimpleNamespace(authorization=SimpleNamespace(can=lambda code: False)))
+
+    assert exc.value.status_code == 403
+
+
 def test_require_sensitivity_tier_rejects_missing_tier():
     dependency = dependencies.require_sensitivity_tier("trust_fraud_flags")
 

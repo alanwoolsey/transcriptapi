@@ -406,8 +406,8 @@ def test_create_platform_tenant_admin_returns_created_record(monkeypatch):
             "email": payload.email,
             "displayName": payload.displayName,
             "status": "invited",
-            "baseRole": payload.baseRole or "director",
-            "roles": payload.roles or ["decision_releaser_director"],
+            "baseRole": payload.baseRole or "tenant_admin",
+            "roles": payload.roles or ["tenant_admin"],
             "permissions": ["view_student_360"],
             "sensitivityTiers": payload.sensitivityTiers,
             "scopes": payload.scopes.model_dump(),
@@ -439,7 +439,7 @@ def test_create_platform_tenant_admin_returns_created_record(monkeypatch):
     assert response.status_code == 201
     assert observed["tenant_id"] == tenant_id
     assert observed["payload"].email == "admin@acme.edu"
-    assert response.json()["roles"] == ["decision_releaser_director"]
+    assert response.json()["roles"] == ["tenant_admin"]
 
 
 def test_get_admin_user_returns_404_when_missing(monkeypatch):

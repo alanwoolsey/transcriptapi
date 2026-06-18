@@ -1327,8 +1327,8 @@ class OperationsService:
                 return None
         admin_payload = payload.model_copy(
             update={
-                "roles": payload.roles or ["decision_releaser_director"],
-                "baseRole": payload.baseRole or "director",
+                "roles": payload.roles or ["tenant_admin"],
+                "baseRole": payload.baseRole or "tenant_admin",
             }
         )
         return self.create_admin_user(resolved_tenant_id, actor_user_id, admin_payload)

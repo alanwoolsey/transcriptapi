@@ -26,6 +26,7 @@ from app.db.models import (
 )
 from app.db.session import get_database_url, get_session_factory
 from app.models.api_models import ParseTranscriptResponse
+from app.services.document_storage_service import DocumentStorageService
 from app.services.student_resolution import StudentResolutionService
 from app.services.work_state_projector import WorkStateProjector
 from app.utils.storage_utils import build_document_storage_key, build_pending_storage_key, slugify_storage_filename
@@ -36,6 +37,7 @@ class TranscriptPersistenceService:
         self.session_factory = session_factory or get_session_factory
         self.student_resolution = StudentResolutionService()
         self.work_state_projector = WorkStateProjector(session_factory=self.session_factory)
+        self.document_storage = DocumentStorageService()
 
     def is_enabled(self) -> bool:
         return bool(get_database_url())
@@ -66,7 +68,7 @@ class TranscriptPersistenceService:
                     original_filename=filename,
                     mime_type=content_type or "application/octet-stream",
                     file_size_bytes=len(content),
-                    storage_bucket="direct-upload",
+                    storage_bucket=self.document_storage.default_bucket(),
                     storage_key=build_pending_storage_key(filename),
                     checksum_sha256=checksum,
                     upload_status="processing",
@@ -241,7 +243,7 @@ class TranscriptPersistenceService:
                     original_filename=filename,
                     mime_type=content_type or "application/octet-stream",
                     file_size_bytes=len(content),
-                    storage_bucket="direct-upload",
+                    storage_bucket=self.document_storage.default_bucket(),
                     storage_key=storage_key,
                     checksum_sha256=checksum,
                     upload_status="parsed",
@@ -744,7 +746,7 @@ class TranscriptPersistenceService:
             original_filename=filename,
             mime_type=content_type or "application/octet-stream",
             file_size_bytes=len(content),
-            storage_bucket="direct-upload",
+            storage_bucket=self.document_storage.default_bucket(),
             storage_key=build_pending_storage_key(filename),
             checksum_sha256=checksum,
             upload_status="processing",

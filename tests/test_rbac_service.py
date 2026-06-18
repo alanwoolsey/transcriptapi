@@ -64,6 +64,47 @@ def test_resolve_profile_accepts_direct_membership_role_key(monkeypatch):
     assert profile.can("view_sensitive_docs")
 
 
+def test_tenant_admin_can_manage_users_without_platform_permissions(monkeypatch):
+    service = RBACService()
+    monkeypatch.setattr(service, "sync_seed_data", lambda session: None)
+    session = _FakeSession([
+        [],  # role assignments
+        [],  # record exception grants
+    ])
+
+    profile = service.resolve_profile(
+        session,
+        tenant_id=uuid4(),
+        user_id=uuid4(),
+        membership_role="tenant_admin",
+    )
+
+    assert profile.can("admin_users_view")
+    assert profile.can("admin_users_create")
+    assert profile.can("admin_roles_view")
+    assert not profile.can("platform_tenants_view")
+
+
+def test_director_does_not_receive_platform_permissions(monkeypatch):
+    service = RBACService()
+    monkeypatch.setattr(service, "sync_seed_data", lambda session: None)
+    session = _FakeSession([
+        [],  # role assignments
+        [],  # record exception grants
+    ])
+
+    profile = service.resolve_profile(
+        session,
+        tenant_id=uuid4(),
+        user_id=uuid4(),
+        membership_role="director",
+    )
+
+    assert profile.can("admin_users_view")
+    assert profile.can("release_decision")
+    assert not profile.can("platform_tenants_create")
+
+
 def test_resolve_profile_uses_explicit_assignment_rows(monkeypatch):
     service = RBACService()
     monkeypatch.setattr(service, "sync_seed_data", lambda session: None)

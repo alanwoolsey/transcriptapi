@@ -65,10 +65,29 @@ STARTER_PERMISSIONS: list[dict[str, str]] = [
     {"code": "platform_tenant_admins_create", "label": "Create Client Tenant Admins", "category": "platform"},
 ]
 
+PLATFORM_PERMISSION_CODES = {permission["code"] for permission in STARTER_PERMISSIONS if permission["category"] == "platform"}
+TENANT_ADMIN_PERMISSION_CODES = {
+    permission["code"]
+    for permission in STARTER_PERMISSIONS
+    if permission["category"] != "platform" and permission["code"] != "api_access"
+}
+
 STARTER_ROLES: dict[str, dict[str, object]] = {
     "master_tenant_admin": {
         "name": "Master Tenant Admin",
         "permissions": {p["code"] for p in STARTER_PERMISSIONS},
+        "sensitivities": {
+            SENSITIVITY_BASIC_PROFILE,
+            SENSITIVITY_ACADEMIC_RECORD,
+            SENSITIVITY_TRANSCRIPT_IMAGES,
+            SENSITIVITY_TRUST_FRAUD_FLAGS,
+            SENSITIVITY_NOTES,
+            SENSITIVITY_RELEASED_DECISIONS,
+        },
+    },
+    "tenant_admin": {
+        "name": "Tenant Administrator",
+        "permissions": TENANT_ADMIN_PERMISSION_CODES,
         "sensitivities": {
             SENSITIVITY_BASIC_PROFILE,
             SENSITIVITY_ACADEMIC_RECORD,
@@ -104,7 +123,7 @@ STARTER_ROLES: dict[str, dict[str, object]] = {
     },
     "decision_releaser_director": {
         "name": "Decision Releaser / Director",
-        "permissions": {p["code"] for p in STARTER_PERMISSIONS if p["code"] != "api_access"},
+        "permissions": TENANT_ADMIN_PERMISSION_CODES,
         "sensitivities": {
             SENSITIVITY_BASIC_PROFILE,
             SENSITIVITY_ACADEMIC_RECORD,
@@ -146,6 +165,9 @@ MEMBERSHIP_ROLE_FALLBACKS = {
     "processor": "admissions_processor",
     "reviewer": "reviewer_evaluator",
     "director": "decision_releaser_director",
+    "admin": "tenant_admin",
+    "tenant admin": "tenant_admin",
+    "tenant administrator": "tenant_admin",
     "registrar": "registrar_transfer_specialist",
     "financial aid": "financial_aid",
     "read only": "read_only_leadership",

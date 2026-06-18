@@ -102,6 +102,16 @@ def require_permission(permission_code: str):
     return dependency
 
 
+def require_any_permission(*permission_codes: str):
+    def dependency(auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context)) -> AuthenticatedTenantContext:
+        if not any(auth_context.authorization.can(permission_code) for permission_code in permission_codes):
+            joined = ", ".join(permission_codes)
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Missing one of permissions: {joined}")
+        return auth_context
+
+    return dependency
+
+
 def require_sensitivity_tier(tier: str):
     def dependency(auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context)) -> AuthenticatedTenantContext:
         if not auth_context.authorization.can_access_tier(tier):

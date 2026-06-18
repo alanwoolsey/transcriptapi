@@ -28,6 +28,11 @@ output "task_role_arn" {
   value       = aws_iam_role.task.arn
 }
 
+output "document_storage_bucket" {
+  description = "Private S3 bucket used for uploaded document content."
+  value       = aws_s3_bucket.document_storage.bucket
+}
+
 output "certificate_arn" {
   description = "ACM certificate ARN selected for the HTTPS listener."
   value       = local.listener_certificate_arn
