@@ -1186,6 +1186,17 @@ class OperationsService:
                 .limit(1)
             ).scalar_one_or_none()
             if document is None:
+                document = session.execute(
+                    select(DocumentUpload)
+                    .join(Transcript, Transcript.document_upload_id == DocumentUpload.id)
+                    .where(
+                        Transcript.tenant_id == tenant_id,
+                        Transcript.id == resolved_document_id,
+                        DocumentUpload.tenant_id == tenant_id,
+                    )
+                    .limit(1)
+                ).scalar_one_or_none()
+            if document is None:
                 return None
             try:
                 content = self.document_storage.read_bytes(

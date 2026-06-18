@@ -156,6 +156,9 @@ class AuditModel(BaseModel):
 
 class ParseTranscriptResponse(BaseModel):
     documentId: str
+    documentUploadId: Optional[str] = None
+    transcriptId: Optional[str] = None
+    parseRunId: Optional[str] = None
     demographic: DemographicModel = Field(default_factory=DemographicModel)
     courses: List[CourseTranscriptModel] = Field(default_factory=list)
     gradePointMap: List[GradePointMapModel] = Field(default_factory=list)

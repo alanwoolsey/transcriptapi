@@ -310,6 +310,9 @@ def _parse_single_upload(
         tenant_id=tenant_id,
     )
     if persistence_ids:
+        result["documentUploadId"] = persistence_ids.get("documentUploadId")
+        result["transcriptId"] = persistence_ids.get("transcriptId")
+        result["parseRunId"] = persistence_ids.get("parseRunId")
         result.setdefault("metadata", {})
         result["metadata"]["persistence"] = persistence_ids
     result.setdefault("metadata", {})

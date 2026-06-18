@@ -140,7 +140,7 @@ def test_parse_endpoint_persists_single_upload(monkeypatch):
                 "tenant_id": tenant_id,
             }
         )
-        return {"transcriptId": "tx-1"}
+        return {"documentUploadId": "du-1", "transcriptId": "tx-1", "parseRunId": "pr-1"}
 
     monkeypatch.setattr(routes.pipeline, "process", fake_process)
     monkeypatch.setattr(routes.persistence, "persist_upload", fake_persist_upload)
@@ -154,6 +154,9 @@ def test_parse_endpoint_persists_single_upload(monkeypatch):
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["documentUploadId"] == "du-1"
+    assert payload["transcriptId"] == "tx-1"
+    assert payload["parseRunId"] == "pr-1"
     assert payload["metadata"]["persistence"]["transcriptId"] == "tx-1"
     assert payload["metadata"]["tenantId"] == "tenant-123"
     assert persist_calls == [
