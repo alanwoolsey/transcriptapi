@@ -27,6 +27,11 @@ from app.models.operations_models import (
     HandoffResponse,
     IncompleteQueueResponse,
     MeltQueueResponse,
+    PlatformTenantAdminCreateRequest,
+    PlatformTenantCreateRequest,
+    PlatformTenantItem,
+    PlatformTenantsResponse,
+    PlatformTenantUpdateRequest,
     ReportingOverviewResponse,
     ReviewReadyResponse,
     SensitivityTierItem,
@@ -319,6 +324,88 @@ def get_reporting_overview(
     auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
 ) -> ReportingOverviewResponse:
     return operations_service.get_reporting_overview(auth_context.tenant.id)
+
+
+@router.get("/platform/tenants", response_model=PlatformTenantsResponse)
+def get_platform_tenants(
+    q: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    pageSize: int = Query(default=25, ge=1, le=200),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("platform_tenants_view")),
+) -> PlatformTenantsResponse:
+    return operations_service.get_platform_tenants(q=q, status=status, page=page, page_size=pageSize)
+
+
+@router.post("/platform/tenants", response_model=PlatformTenantItem, status_code=status.HTTP_201_CREATED)
+def create_platform_tenant(
+    payload: PlatformTenantCreateRequest,
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("platform_tenants_create")),
+) -> PlatformTenantItem:
+    try:
+        return operations_service.create_platform_tenant(auth_context.user.id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.patch("/platform/tenants/{tenant_id}", response_model=PlatformTenantItem)
+def update_platform_tenant(
+    tenant_id: str,
+    payload: PlatformTenantUpdateRequest,
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("platform_tenants_update")),
+) -> PlatformTenantItem:
+    try:
+        item = operations_service.update_platform_tenant(auth_context.user.id, tenant_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if item is None:
+        raise HTTPException(status_code=404, detail="Tenant not found.")
+    return item
+
+
+@router.post("/platform/tenants/{tenant_id}/activate", response_model=PlatformTenantItem)
+def activate_platform_tenant(
+    tenant_id: str,
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("platform_tenants_update")),
+) -> PlatformTenantItem:
+    item = operations_service.update_platform_tenant(
+        auth_context.user.id,
+        tenant_id,
+        PlatformTenantUpdateRequest(status="active"),
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Tenant not found.")
+    return item
+
+
+@router.post("/platform/tenants/{tenant_id}/deactivate", response_model=PlatformTenantItem)
+def deactivate_platform_tenant(
+    tenant_id: str,
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("platform_tenants_update")),
+) -> PlatformTenantItem:
+    item = operations_service.update_platform_tenant(
+        auth_context.user.id,
+        tenant_id,
+        PlatformTenantUpdateRequest(status="inactive"),
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Tenant not found.")
+    return item
+
+
+@router.post("/platform/tenants/{tenant_id}/admins", response_model=AdminUserItem, status_code=status.HTTP_201_CREATED)
+def create_platform_tenant_admin(
+    tenant_id: str,
+    payload: PlatformTenantAdminCreateRequest,
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("platform_tenant_admins_create")),
+) -> AdminUserItem:
+    try:
+        item = operations_service.create_platform_tenant_admin(auth_context.user.id, tenant_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if item is None:
+        raise HTTPException(status_code=404, detail="Tenant not found.")
+    return item
 
 
 @router.get("/admin/users", response_model=AdminUsersResponse)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
+import re
 import secrets
 from uuid import UUID
 
@@ -31,6 +32,7 @@ from app.db.models import (
     StudentMeltScore,
     StudentPriorityScore,
     StudentYieldScore,
+    Tenant,
     TenantSettings,
     TenantUserMembership,
     Program,
@@ -66,6 +68,11 @@ from app.models.operations_models import (
     AdminUserItem,
     AdminUserReassignRequest,
     AdminUsersResponse,
+    PlatformTenantAdminCreateRequest,
+    PlatformTenantCreateRequest,
+    PlatformTenantItem,
+    PlatformTenantsResponse,
+    PlatformTenantUpdateRequest,
     AgentRunActionItemResponse,
     AgentRunActionsResponse,
     AgentRunResultResponse,
@@ -1166,6 +1173,138 @@ class OperationsService:
                 meltRate=self._ratio(melt_risk_total, melt_total),
             )
 
+    def get_platform_tenants(
+        self,
+        *,
+        q: str | None = None,
+        status: str | None = None,
+        page: int = 1,
+        page_size: int = 25,
+    ) -> PlatformTenantsResponse:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            rows = session.execute(select(Tenant).order_by(Tenant.name.asc(), Tenant.created_at.asc())).scalars().all()
+            filtered: list[PlatformTenantItem] = []
+            for tenant in rows:
+                if q and q.strip():
+                    haystack = " ".join([tenant.name or "", tenant.slug or "", tenant.status or ""]).lower()
+                    if q.strip().lower() not in haystack:
+                        continue
+                if status and tenant.status != status:
+                    continue
+                filtered.append(self._serialize_platform_tenant(session, tenant))
+            start = (page - 1) * page_size
+            return PlatformTenantsResponse(items=filtered[start:start + page_size], page=page, pageSize=page_size, total=len(filtered))
+
+    def create_platform_tenant(self, actor_user_id: UUID, payload: PlatformTenantCreateRequest) -> PlatformTenantItem:
+        name = payload.name.strip()
+        if not name:
+            raise ValueError("Tenant name is required.")
+        slug = self._normalize_tenant_slug(payload.slug or name)
+        status = self._normalize_tenant_status(payload.status)
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            existing = session.execute(select(Tenant).where(Tenant.slug == slug).limit(1)).scalar_one_or_none()
+            if existing is not None:
+                raise ValueError("Tenant slug already exists.")
+            tenant = Tenant(
+                name=name,
+                slug=slug,
+                status=status,
+                primary_region=(payload.primaryRegion.strip() if payload.primaryRegion else None),
+                data_retention_days=payload.dataRetentionDays,
+            )
+            session.add(tenant)
+            session.flush()
+            session.add(
+                TenantSettings(
+                    tenant_id=tenant.id,
+                    default_document_type="auto",
+                    use_bedrock_default=True,
+                    student_match_strategy="auto",
+                    queue_sla_hours=24,
+                    settings_json={},
+                )
+            )
+            self._write_platform_audit(
+                session,
+                tenant_id=tenant.id,
+                actor_user_id=actor_user_id,
+                action="platform_tenant_created",
+                target_tenant_id=tenant.id,
+                before={},
+                after=self._tenant_audit_payload(tenant),
+            )
+            session.commit()
+            return self._serialize_platform_tenant(session, tenant)
+
+    def update_platform_tenant(self, actor_user_id: UUID, tenant_id: str, payload: PlatformTenantUpdateRequest) -> PlatformTenantItem | None:
+        try:
+            resolved_tenant_id = UUID(tenant_id)
+        except ValueError:
+            return None
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            tenant = session.get(Tenant, resolved_tenant_id)
+            if tenant is None:
+                return None
+            before = self._tenant_audit_payload(tenant)
+            if payload.name is not None:
+                name = payload.name.strip()
+                if not name:
+                    raise ValueError("Tenant name is required.")
+                tenant.name = name
+            if payload.slug is not None:
+                slug = self._normalize_tenant_slug(payload.slug)
+                existing = session.execute(
+                    select(Tenant).where(Tenant.slug == slug, Tenant.id != tenant.id).limit(1)
+                ).scalar_one_or_none()
+                if existing is not None:
+                    raise ValueError("Tenant slug already exists.")
+                tenant.slug = slug
+            if payload.status is not None:
+                tenant.status = self._normalize_tenant_status(payload.status)
+            if payload.primaryRegion is not None:
+                tenant.primary_region = payload.primaryRegion.strip() or None
+            if payload.dataRetentionDays is not None:
+                tenant.data_retention_days = payload.dataRetentionDays
+            tenant.updated_at = datetime.now(timezone.utc)
+            after = self._tenant_audit_payload(tenant)
+            self._write_platform_audit(
+                session,
+                tenant_id=tenant.id,
+                actor_user_id=actor_user_id,
+                action="platform_tenant_updated",
+                target_tenant_id=tenant.id,
+                before=before,
+                after=after,
+            )
+            session.commit()
+            return self._serialize_platform_tenant(session, tenant)
+
+    def create_platform_tenant_admin(
+        self,
+        actor_user_id: UUID,
+        tenant_id: str,
+        payload: PlatformTenantAdminCreateRequest,
+    ) -> AdminUserItem | None:
+        try:
+            resolved_tenant_id = UUID(tenant_id)
+        except ValueError:
+            return None
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            tenant = session.get(Tenant, resolved_tenant_id)
+            if tenant is None:
+                return None
+        admin_payload = payload.model_copy(
+            update={
+                "roles": payload.roles or ["decision_releaser_director"],
+                "baseRole": payload.baseRole or "director",
+            }
+        )
+        return self.create_admin_user(resolved_tenant_id, actor_user_id, admin_payload)
+
     def get_admin_users(
         self,
         tenant_id: UUID,
@@ -1588,6 +1727,82 @@ class OperationsService:
             createdAt=self._iso(user.created_at),
             updatedAt=self._iso(user.updated_at),
         )
+
+    def _serialize_platform_tenant(self, session: Session, tenant: Tenant) -> PlatformTenantItem:
+        admin_count = session.execute(
+            select(func.count())
+            .select_from(TenantUserMembership)
+            .join(AppUser, AppUser.id == TenantUserMembership.user_id)
+            .where(
+                TenantUserMembership.tenant_id == tenant.id,
+                TenantUserMembership.status == "active",
+                AppUser.is_active.is_(True),
+                TenantUserMembership.role.in_(["director", "decision_releaser_director"]),
+            )
+        ).scalar_one()
+        return PlatformTenantItem(
+            tenantId=str(tenant.id),
+            name=tenant.name,
+            slug=tenant.slug,
+            status=tenant.status,
+            primaryRegion=tenant.primary_region,
+            dataRetentionDays=tenant.data_retention_days,
+            adminUserCount=int(admin_count or 0),
+            createdAt=self._iso(tenant.created_at),
+            updatedAt=self._iso(tenant.updated_at),
+        )
+
+    def _tenant_audit_payload(self, tenant: Tenant) -> dict:
+        return {
+            "tenantId": str(tenant.id),
+            "name": tenant.name,
+            "slug": tenant.slug,
+            "status": tenant.status,
+            "primaryRegion": tenant.primary_region,
+            "dataRetentionDays": tenant.data_retention_days,
+        }
+
+    def _write_platform_audit(
+        self,
+        session: Session,
+        tenant_id: UUID,
+        actor_user_id: UUID,
+        action: str,
+        target_tenant_id: UUID,
+        before: dict,
+        after: dict,
+    ) -> None:
+        session.add(
+            AuditEvent(
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                entity_type="tenant",
+                entity_id=target_tenant_id,
+                category="Platform",
+                action=action,
+                success=True,
+                error_message=None,
+                payload_json={"before": before, "after": after},
+                correlation_id=None,
+                source="PlatformAdmin",
+                occurred_at=datetime.now(timezone.utc),
+            )
+        )
+
+    def _normalize_tenant_slug(self, value: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+        slug = re.sub(r"-{2,}", "-", slug)
+        if not slug:
+            raise ValueError("Tenant slug is required.")
+        if len(slug) > 80:
+            slug = slug[:80].rstrip("-")
+        return slug
+
+    def _normalize_tenant_status(self, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"active", "inactive"}:
+            raise ValueError("Tenant status must be active or inactive.")
+        return normalized
 
     def _replace_user_rbac(
         self,

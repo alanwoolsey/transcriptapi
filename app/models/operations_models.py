@@ -212,6 +212,38 @@ class AdminUsersResponse(PaginatedResponse):
     items: list[AdminUserItem] = Field(default_factory=list)
 
 
+class PlatformTenantItem(BaseModel):
+    tenantId: str
+    name: str
+    slug: str
+    status: str
+    primaryRegion: str | None = None
+    dataRetentionDays: int | None = None
+    adminUserCount: int = 0
+    createdAt: str | None = None
+    updatedAt: str | None = None
+
+
+class PlatformTenantsResponse(PaginatedResponse):
+    items: list[PlatformTenantItem] = Field(default_factory=list)
+
+
+class PlatformTenantCreateRequest(BaseModel):
+    name: str
+    slug: str | None = None
+    status: str = "active"
+    primaryRegion: str | None = None
+    dataRetentionDays: int | None = None
+
+
+class PlatformTenantUpdateRequest(BaseModel):
+    name: str | None = None
+    slug: str | None = None
+    status: str | None = None
+    primaryRegion: str | None = None
+    dataRetentionDays: int | None = None
+
+
 class AdminRoleItem(BaseModel):
     key: str
     label: str
@@ -268,6 +300,10 @@ class AdminUserCreateRequest(BaseModel):
     sensitivityTiers: list[str] = Field(default_factory=list)
     scopes: AdminUserScopes = Field(default_factory=AdminUserScopes)
     sendInvite: bool = True
+
+
+class PlatformTenantAdminCreateRequest(AdminUserCreateRequest):
+    pass
 
 
 class AdminUserUpdateRequest(BaseModel):

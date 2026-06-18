@@ -255,6 +255,193 @@ def test_create_admin_user_returns_created_record(monkeypatch):
     assert response.json()["status"] == "invited"
 
 
+def test_get_platform_tenants_returns_paginated_payload(monkeypatch):
+    from app.api import operations_routes
+
+    observed = {}
+
+    def fake_get_platform_tenants(**kwargs):
+        observed.update(kwargs)
+        return {
+            "items": [
+                {
+                    "tenantId": str(uuid4()),
+                    "name": "Acme University",
+                    "slug": "acme-university",
+                    "status": "active",
+                    "primaryRegion": "us-east-1",
+                    "dataRetentionDays": 365,
+                    "adminUserCount": 1,
+                    "createdAt": "2026-06-18T10:00:00Z",
+                    "updatedAt": "2026-06-18T10:00:00Z",
+                }
+            ],
+            "page": kwargs["page"],
+            "pageSize": kwargs["page_size"],
+            "total": 1,
+        }
+
+    monkeypatch.setattr(operations_routes.operations_service, "get_platform_tenants", fake_get_platform_tenants)
+
+    client = TestClient(_build_test_app())
+    response = client.get("/api/v1/platform/tenants?q=acme&status=active&page=2&pageSize=10")
+
+    assert response.status_code == 200
+    assert observed == {"q": "acme", "status": "active", "page": 2, "page_size": 10}
+    assert response.json()["items"][0]["slug"] == "acme-university"
+
+
+def test_create_platform_tenant_returns_created_record(monkeypatch):
+    from app.api import operations_routes
+
+    observed = {}
+
+    def fake_create_platform_tenant(actor_user_id, payload):
+        observed["actor_user_id"] = actor_user_id
+        observed["payload"] = payload
+        return {
+            "tenantId": str(uuid4()),
+            "name": payload.name,
+            "slug": payload.slug,
+            "status": payload.status,
+            "primaryRegion": payload.primaryRegion,
+            "dataRetentionDays": payload.dataRetentionDays,
+            "adminUserCount": 0,
+            "createdAt": "2026-06-18T10:00:00Z",
+            "updatedAt": "2026-06-18T10:00:00Z",
+        }
+
+    monkeypatch.setattr(operations_routes.operations_service, "create_platform_tenant", fake_create_platform_tenant)
+
+    client = TestClient(_build_test_app())
+    response = client.post(
+        "/api/v1/platform/tenants",
+        json={
+            "name": "Acme University",
+            "slug": "acme-university",
+            "status": "active",
+            "primaryRegion": "us-east-1",
+            "dataRetentionDays": 365,
+        },
+    )
+
+    assert response.status_code == 201
+    assert observed["payload"].name == "Acme University"
+    assert response.json()["adminUserCount"] == 0
+
+
+def test_patch_platform_tenant_updates_status(monkeypatch):
+    from app.api import operations_routes
+
+    tenant_id = str(uuid4())
+    observed = {}
+
+    def fake_update_platform_tenant(actor_user_id, requested_tenant_id, payload):
+        observed["tenant_id"] = requested_tenant_id
+        observed["payload"] = payload
+        return {
+            "tenantId": requested_tenant_id,
+            "name": "Acme University",
+            "slug": "acme-university",
+            "status": payload.status,
+            "primaryRegion": "us-east-1",
+            "dataRetentionDays": 365,
+            "adminUserCount": 1,
+            "createdAt": "2026-06-18T10:00:00Z",
+            "updatedAt": "2026-06-18T11:00:00Z",
+        }
+
+    monkeypatch.setattr(operations_routes.operations_service, "update_platform_tenant", fake_update_platform_tenant)
+
+    client = TestClient(_build_test_app())
+    response = client.patch(f"/api/v1/platform/tenants/{tenant_id}", json={"status": "inactive"})
+
+    assert response.status_code == 200
+    assert observed["tenant_id"] == tenant_id
+    assert observed["payload"].status == "inactive"
+    assert response.json()["status"] == "inactive"
+
+
+def test_deactivate_platform_tenant_sets_inactive(monkeypatch):
+    from app.api import operations_routes
+
+    tenant_id = str(uuid4())
+    observed = {}
+
+    def fake_update_platform_tenant(actor_user_id, requested_tenant_id, payload):
+        observed["payload"] = payload
+        return {
+            "tenantId": requested_tenant_id,
+            "name": "Acme University",
+            "slug": "acme-university",
+            "status": payload.status,
+            "primaryRegion": None,
+            "dataRetentionDays": None,
+            "adminUserCount": 1,
+            "createdAt": "2026-06-18T10:00:00Z",
+            "updatedAt": "2026-06-18T11:00:00Z",
+        }
+
+    monkeypatch.setattr(operations_routes.operations_service, "update_platform_tenant", fake_update_platform_tenant)
+
+    client = TestClient(_build_test_app())
+    response = client.post(f"/api/v1/platform/tenants/{tenant_id}/deactivate")
+
+    assert response.status_code == 200
+    assert observed["payload"].status == "inactive"
+    assert response.json()["status"] == "inactive"
+
+
+def test_create_platform_tenant_admin_returns_created_record(monkeypatch):
+    from app.api import operations_routes
+
+    tenant_id = str(uuid4())
+    observed = {}
+
+    def fake_create_platform_tenant_admin(actor_user_id, requested_tenant_id, payload):
+        observed["tenant_id"] = requested_tenant_id
+        observed["payload"] = payload
+        return {
+            "userId": str(uuid4()),
+            "email": payload.email,
+            "displayName": payload.displayName,
+            "status": "invited",
+            "baseRole": payload.baseRole or "director",
+            "roles": payload.roles or ["decision_releaser_director"],
+            "permissions": ["view_student_360"],
+            "sensitivityTiers": payload.sensitivityTiers,
+            "scopes": payload.scopes.model_dump(),
+            "lastLoginAt": None,
+            "createdAt": "2026-06-18T10:00:00Z",
+            "updatedAt": "2026-06-18T10:00:00Z",
+        }
+
+    monkeypatch.setattr(operations_routes.operations_service, "create_platform_tenant_admin", fake_create_platform_tenant_admin)
+
+    client = TestClient(_build_test_app())
+    response = client.post(
+        f"/api/v1/platform/tenants/{tenant_id}/admins",
+        json={
+            "email": "admin@acme.edu",
+            "displayName": "Acme Admin",
+            "sensitivityTiers": ["basic_profile"],
+            "scopes": {
+                "campuses": ["*"],
+                "territories": ["*"],
+                "programs": ["*"],
+                "studentPopulations": ["*"],
+                "stages": ["*"],
+            },
+            "sendInvite": True,
+        },
+    )
+
+    assert response.status_code == 201
+    assert observed["tenant_id"] == tenant_id
+    assert observed["payload"].email == "admin@acme.edu"
+    assert response.json()["roles"] == ["decision_releaser_director"]
+
+
 def test_get_admin_user_returns_404_when_missing(monkeypatch):
     from app.api import operations_routes
 

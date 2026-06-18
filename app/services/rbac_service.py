@@ -59,9 +59,25 @@ STARTER_PERMISSIONS: list[dict[str, str]] = [
     {"code": "admin_users_delete", "label": "Delete Admin Users", "category": "admin"},
     {"code": "admin_roles_view", "label": "View Admin Roles", "category": "admin"},
     {"code": "admin_scopes_manage", "label": "Manage Admin Scopes", "category": "admin"},
+    {"code": "platform_tenants_view", "label": "View Platform Tenants", "category": "platform"},
+    {"code": "platform_tenants_create", "label": "Create Platform Tenants", "category": "platform"},
+    {"code": "platform_tenants_update", "label": "Update Platform Tenants", "category": "platform"},
+    {"code": "platform_tenant_admins_create", "label": "Create Client Tenant Admins", "category": "platform"},
 ]
 
 STARTER_ROLES: dict[str, dict[str, object]] = {
+    "master_tenant_admin": {
+        "name": "Master Tenant Admin",
+        "permissions": {p["code"] for p in STARTER_PERMISSIONS},
+        "sensitivities": {
+            SENSITIVITY_BASIC_PROFILE,
+            SENSITIVITY_ACADEMIC_RECORD,
+            SENSITIVITY_TRANSCRIPT_IMAGES,
+            SENSITIVITY_TRUST_FRAUD_FLAGS,
+            SENSITIVITY_NOTES,
+            SENSITIVITY_RELEASED_DECISIONS,
+        },
+    },
     "admissions_counselor": {
         "name": "Admissions Counselor",
         "permissions": {
