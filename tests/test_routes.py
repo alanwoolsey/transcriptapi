@@ -3,11 +3,22 @@ import zipfile
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import get_current_tenant_context
 from app.api.routes import router
+
+
+@pytest.fixture(autouse=True)
+def _disable_external_extraction_by_default(monkeypatch):
+    from app.api import routes
+
+    class DisabledExtractionClient:
+        is_enabled = False
+
+    monkeypatch.setattr(routes, "extraction_client", DisabledExtractionClient())
 
 
 def _build_test_app() -> FastAPI:
@@ -157,6 +168,62 @@ def test_parse_endpoint_persists_single_upload(monkeypatch):
     ]
 
 
+def test_parse_endpoint_uses_external_extraction_service_when_configured(monkeypatch):
+    from app.api import routes
+
+    class FakeExtractionClient:
+        is_enabled = True
+
+        def process(self, **kwargs):
+            assert kwargs["tenant_id"] == "tenant-123"
+            assert kwargs["filename"] == "one.pdf"
+            return {
+                "documentId": "remote-doc-123",
+                "demographic": {
+                    "firstName": "Jane",
+                    "lastName": "Smith",
+                    "middleName": "",
+                    "studentId": "123",
+                    "institutionName": "Example U",
+                },
+                "courses": [],
+                "gradePointMap": [],
+                "grandGPA": {"unitsEarned": 0.0, "simpleGPA": 0.0, "cumulativeGPA": 0.0, "weightedGPA": 0.0},
+                "termGPAs": [],
+                "audit": [],
+                "isOfficial": True,
+                "isFinalized": False,
+                "finalizedAt": None,
+                "finalizedBy": None,
+                "isFraudulent": False,
+                "fraudFlaggedAt": None,
+                "metadata": {"externalExtraction": {"transcriptId": "remote-tx-1"}},
+            }
+
+    persist_calls = []
+    monkeypatch.setattr(routes, "extraction_client", FakeExtractionClient())
+    monkeypatch.setattr(routes.pipeline, "process", lambda **kwargs: (_ for _ in ()).throw(AssertionError("local parser should not run")))
+    monkeypatch.setattr(
+        routes.persistence,
+        "persist_upload",
+        lambda **kwargs: persist_calls.append(kwargs) or {"transcriptId": "local-tx-1"},
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.post(
+        "/api/v1/transcripts/parse",
+        files={"file": ("one.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        data={"document_type": "college", "use_bedrock": "false"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["documentId"] == "remote-doc-123"
+    assert payload["metadata"]["externalExtraction"]["transcriptId"] == "remote-tx-1"
+    assert payload["metadata"]["persistence"]["transcriptId"] == "local-tx-1"
+    assert persist_calls[0]["response_payload"]["documentId"] == "remote-doc-123"
+
+
 def test_start_transcript_upload_returns_processing_ids(monkeypatch):
     from app.api import routes
 
@@ -300,6 +367,56 @@ def test_process_transcript_upload_batch_processes_all_items(monkeypatch):
     )
 
     assert sorted(calls) == ["tx-1", "tx-2"]
+
+
+def test_process_transcript_upload_uses_external_result_and_completes_local_upload(monkeypatch):
+    from app.api import routes
+
+    class FakeExtractionClient:
+        is_enabled = True
+
+        def process(self, **kwargs):
+            return {
+                "documentId": "remote-doc-123",
+                "demographic": {
+                    "firstName": "Jane",
+                    "lastName": "Smith",
+                    "middleName": "",
+                    "studentId": "123",
+                    "institutionName": "Example U",
+                },
+                "courses": [],
+                "gradePointMap": [],
+                "grandGPA": {"unitsEarned": 0.0, "simpleGPA": 0.0, "cumulativeGPA": 0.0, "weightedGPA": 0.0},
+                "termGPAs": [],
+                "audit": [],
+                "isOfficial": True,
+                "isFinalized": False,
+                "finalizedAt": None,
+                "finalizedBy": None,
+                "isFraudulent": False,
+                "fraudFlaggedAt": None,
+                "metadata": {"externalExtraction": {"transcriptId": "remote-tx-1"}},
+            }
+
+    complete_calls = []
+    monkeypatch.setattr(routes, "extraction_client", FakeExtractionClient())
+    monkeypatch.setattr(routes.pipeline, "process", lambda **kwargs: (_ for _ in ()).throw(AssertionError("local parser should not run")))
+    monkeypatch.setattr(routes.persistence, "complete_processing_upload", lambda **kwargs: complete_calls.append(kwargs))
+
+    routes._process_transcript_upload(
+        transcript_id="local-tx-1",
+        tenant_id="tenant-123",
+        filename="one.pdf",
+        content=b"%PDF-1.4 fake",
+        content_type="application/pdf",
+        requested_document_type="college",
+        use_bedrock=False,
+    )
+
+    assert complete_calls[0]["transcript_id"] == "local-tx-1"
+    assert complete_calls[0]["response_payload"]["documentId"] == "remote-doc-123"
+    assert complete_calls[0]["response_payload"]["metadata"]["tenantId"] == "tenant-123"
 
 
 def test_get_transcript_upload_status(monkeypatch):

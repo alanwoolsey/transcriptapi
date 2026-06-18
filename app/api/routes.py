@@ -16,6 +16,7 @@ from app.models.api_models import (
     TranscriptUploadStatusResponse,
 )
 from app.services.document_storage_service import DocumentStorageService
+from app.services.extraction_service_client import ExternalExtractionServiceClient
 from app.services.pipeline import TranscriptPipeline
 from app.services.persistence import TranscriptPersistenceService
 from app.utils.storage_utils import build_document_storage_key
@@ -27,6 +28,7 @@ router = APIRouter(prefix="/transcripts", tags=["transcripts"])
 pipeline = TranscriptPipeline()
 persistence = TranscriptPersistenceService()
 document_storage = DocumentStorageService()
+extraction_client = ExternalExtractionServiceClient()
 
 
 @router.post("/uploads", response_model=StartTranscriptUploadResponse | StartTranscriptUploadBatchResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -234,12 +236,13 @@ def _process_transcript_upload(
     use_bedrock: bool,
 ) -> None:
     try:
-        result = pipeline.process(
+        result = _extract_transcript(
             filename=filename,
             content=content,
             content_type=content_type,
             requested_document_type=requested_document_type,
             use_bedrock=use_bedrock,
+            tenant_id=tenant_id,
         )
         result.setdefault("metadata", {})
         result["metadata"]["tenantId"] = tenant_id
@@ -289,12 +292,13 @@ def _parse_single_upload(
     use_bedrock: bool,
     tenant_id: str,
 ) -> dict:
-    result = pipeline.process(
+    result = _extract_transcript(
         filename=filename,
         content=content,
         content_type=content_type,
         requested_document_type=requested_document_type,
         use_bedrock=use_bedrock,
+        tenant_id=tenant_id,
     )
     persistence_ids = persistence.persist_upload(
         filename=filename,
@@ -311,6 +315,33 @@ def _parse_single_upload(
     result.setdefault("metadata", {})
     result["metadata"]["tenantId"] = tenant_id
     return result
+
+
+def _extract_transcript(
+    filename: str,
+    content: bytes,
+    content_type: str | None,
+    requested_document_type: str,
+    use_bedrock: bool,
+    tenant_id: str,
+) -> dict:
+    if extraction_client.is_enabled:
+        logger.info("Using external extraction service for transcript filename=%s", filename)
+        return extraction_client.process(
+            filename=filename,
+            content=content,
+            content_type=content_type,
+            requested_document_type=requested_document_type,
+            use_bedrock=use_bedrock,
+            tenant_id=tenant_id,
+        )
+    return pipeline.process(
+        filename=filename,
+        content=content,
+        content_type=content_type,
+        requested_document_type=requested_document_type,
+        use_bedrock=use_bedrock,
+    )
 
 
 def _parse_zip_upload(
