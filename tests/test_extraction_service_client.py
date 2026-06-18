@@ -59,6 +59,7 @@ def test_external_extraction_client_uploads_polls_and_reads_results(monkeypatch)
         return original_client(*args, **kwargs)
 
     monkeypatch.setattr(settings, "extraction_service_url", "https://extract.example.test/")
+    monkeypatch.setattr(settings, "extraction_service_forward_tenant_header", False)
     monkeypatch.setattr(settings, "extraction_service_poll_interval_seconds", 0.1)
     monkeypatch.setattr(httpx, "Client", mock_client)
 
@@ -80,7 +81,15 @@ def test_external_extraction_client_uploads_polls_and_reads_results(monkeypatch)
         "status": "completed",
     }
     assert calls == [
-        ("POST", "/api/v1/transcripts/uploads", "tenant-123"),
-        ("GET", "/api/v1/transcripts/uploads/remote-tx-1/status", "tenant-123"),
-        ("GET", "/api/v1/transcripts/remote-tx-1/results", "tenant-123"),
+        ("POST", "/api/v1/transcripts/uploads", None),
+        ("GET", "/api/v1/transcripts/uploads/remote-tx-1/status", None),
+        ("GET", "/api/v1/transcripts/remote-tx-1/results", None),
     ]
+
+
+def test_external_extraction_client_can_forward_tenant_header_when_enabled(monkeypatch):
+    monkeypatch.setattr(settings, "extraction_service_forward_tenant_header", True)
+
+    headers = ExternalExtractionServiceClient()._headers("tenant-123")
+
+    assert headers == {"X-Tenant-Id": "tenant-123"}

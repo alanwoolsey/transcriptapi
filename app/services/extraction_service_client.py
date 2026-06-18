@@ -22,7 +22,7 @@ class ExternalExtractionServiceClient:
         tenant_id: str | None = None,
     ) -> dict[str, Any]:
         base_url = self._base_url()
-        headers = {"X-Tenant-Id": tenant_id} if tenant_id else None
+        headers = self._headers(tenant_id)
         timeout = settings.extraction_service_request_timeout_seconds
 
         with httpx.Client(base_url=base_url, timeout=timeout) as client:
@@ -136,6 +136,11 @@ class ExternalExtractionServiceClient:
         if not base_url:
             raise ValueError("EXTRACTION_SERVICE_URL is not configured.")
         return base_url
+
+    def _headers(self, tenant_id: str | None) -> dict[str, str] | None:
+        if settings.extraction_service_forward_tenant_header and tenant_id:
+            return {"X-Tenant-Id": tenant_id}
+        return None
 
     def _raise_for_response(self, response: httpx.Response, action: str) -> None:
         if response.is_success:

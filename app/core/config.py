@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     extraction_service_request_timeout_seconds: float = 30.0
     extraction_service_poll_interval_seconds: float = 2.0
     extraction_service_poll_timeout_seconds: float = 300.0
+    extraction_service_forward_tenant_header: bool = False
     max_upload_mb: int = 15
     upload_batch_max_workers: int = 4
     database_url: str | None = None
