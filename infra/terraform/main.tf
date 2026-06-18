@@ -32,7 +32,7 @@ locals {
   common_tags              = merge(var.tags, { Project = var.project_name, Service = var.service_name, ManagedBy = "Terraform" })
   create_acm_certificate   = var.enable_managed_acm_certificate && var.existing_certificate_arn == null
   listener_certificate_arn = var.existing_certificate_arn != null ? var.existing_certificate_arn : try(aws_acm_certificate.service[0].arn, null)
-  https_ready              = var.existing_certificate_arn != null || length(aws_acm_certificate_validation.service) > 0
+  https_ready              = var.existing_certificate_arn != null || (local.create_acm_certificate && length(var.certificate_validation_record_fqdns) > 0)
   alb_name                 = trimsuffix(substr("${local.name_prefix}-alb", 0, 32), "-")
   target_group_name        = trimsuffix(substr("${local.name_prefix}-tg", 0, 32), "-")
   db_secret_name           = "${local.name_prefix}/database"
@@ -353,8 +353,9 @@ resource "aws_db_parameter_group" "postgres" {
   family = "postgres17"
 
   parameter {
-    name  = "rds.force_ssl"
-    value = "1"
+    name         = "rds.force_ssl"
+    value        = "1"
+    apply_method = "pending-reboot"
   }
 
   tags = local.common_tags

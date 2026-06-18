@@ -121,6 +121,26 @@ jobs:
           fi
           echo "exitcode=$exitcode" >> "$GITHUB_OUTPUT"
 
+      - name: Block Destructive Terraform Changes
+        if: steps.plan.outputs.exitcode == '2'
+        working-directory: ${{ env.TF_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform show -json tfplan > tfplan.json
+          destructive_count="$(
+            jq '[.resource_changes[]
+              | select(.change.actions | index("delete") or index("replace"))
+            ] | length' tfplan.json
+          )"
+          if [ "$destructive_count" != "0" ]; then
+            echo "Terraform plan contains delete or replace actions. Refusing automatic apply."
+            jq -r '.resource_changes[]
+              | select(.change.actions | index("delete") or index("replace"))
+              | "\(.address): \(.change.actions | join(","))"' tfplan.json
+            exit 1
+          fi
+
       - name: Terraform Apply
         if: steps.plan.outputs.exitcode == '2'
         working-directory: ${{ env.TF_DIR }}
