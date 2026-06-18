@@ -60,6 +60,8 @@ jobs:
 
       - name: Set Up Terraform
         uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
 
       - name: Bootstrap Terraform Backend
         id: backend
@@ -142,6 +144,8 @@ jobs:
 
       - name: Set Up Terraform
         uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
 
       - name: Bootstrap Terraform Backend
         id: backend
