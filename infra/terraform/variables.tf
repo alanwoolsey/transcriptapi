@@ -127,6 +127,12 @@ variable "upload_batch_max_workers" {
   default     = 20
 }
 
+variable "extraction_service_url" {
+  description = "External transcript extraction service URL."
+  type        = string
+  default     = "https://extractorservice.freedomv3.com"
+}
+
 variable "health_check_path" {
   description = "ALB target group health check path."
   type        = string
