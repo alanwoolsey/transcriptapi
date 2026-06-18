@@ -859,6 +859,42 @@ def test_get_document_exceptions_returns_payload(monkeypatch):
     assert response.json()["items"][0]["suggestedAction"] == "Open the exception details and confirm or reject the document match."
 
 
+def test_get_document_content_streams_inline_payload(monkeypatch):
+    from app.api import document_routes
+
+    monkeypatch.setattr(
+        document_routes.operations_service,
+        "get_document_content",
+        lambda tenant_id, document_id: {
+            "content": b"%PDF-1.4 fake",
+            "content_type": "application/pdf",
+            "filename": "official transcript.pdf",
+            "file_size_bytes": 13,
+        },
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.get("/api/v1/documents/doc-1/content")
+
+    assert response.status_code == 200
+    assert response.content == b"%PDF-1.4 fake"
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["content-disposition"].startswith('inline; filename="official transcript.pdf"')
+    assert response.headers["cache-control"] == "private, no-store"
+
+
+def test_get_document_content_returns_404_when_missing(monkeypatch):
+    from app.api import document_routes
+
+    monkeypatch.setattr(document_routes.operations_service, "get_document_content", lambda tenant_id, document_id: None)
+
+    client = TestClient(_build_test_app())
+    response = client.get("/api/v1/documents/doc-1/content")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Document not found."
+
+
 def test_get_document_exception_summary_returns_payload(monkeypatch):
     from app.api import document_routes
 

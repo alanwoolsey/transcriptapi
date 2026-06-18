@@ -1173,6 +1173,34 @@ class OperationsService:
                 meltRate=self._ratio(melt_risk_total, melt_total),
             )
 
+    def get_document_content(self, tenant_id: UUID, document_id: str) -> dict | None:
+        try:
+            resolved_document_id = UUID(document_id)
+        except ValueError:
+            return None
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            document = session.execute(
+                select(DocumentUpload)
+                .where(DocumentUpload.tenant_id == tenant_id, DocumentUpload.id == resolved_document_id)
+                .limit(1)
+            ).scalar_one_or_none()
+            if document is None:
+                return None
+            try:
+                content = self.document_storage.read_bytes(
+                    storage_bucket=document.storage_bucket,
+                    storage_key=document.storage_key,
+                )
+            except FileNotFoundError:
+                return None
+            return {
+                "content": content,
+                "content_type": document.mime_type or "application/octet-stream",
+                "filename": document.original_filename,
+                "file_size_bytes": document.file_size_bytes,
+            }
+
     def get_platform_tenants(
         self,
         *,

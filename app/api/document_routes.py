@@ -1,4 +1,7 @@
+from urllib.parse import quote
+
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import AuthenticatedTenantContext, require_permission
@@ -16,6 +19,14 @@ from app.services.operations_service import OperationsService
 router = APIRouter(prefix="/documents", tags=["documents"])
 admissions_ops_service = AdmissionsOpsService()
 operations_service = OperationsService()
+
+
+def _inline_content_disposition(filename: str | None) -> str:
+    raw_filename = filename or "document"
+    fallback = "".join(ch if 32 <= ord(ch) < 127 and ch not in {'"', "\\", ";"} else "_" for ch in raw_filename).strip()
+    if not fallback:
+        fallback = "document"
+    return f"inline; filename=\"{fallback}\"; filename*=UTF-8''{quote(raw_filename)}"
 
 
 @router.post("/{document_id}/link-checklist-item", response_model=StudentChecklistResponse)
@@ -44,6 +55,27 @@ def get_document_exceptions(
     auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
 ) -> DocumentExceptionsResponse:
     return admissions_ops_service.get_document_exceptions(auth_context.tenant.id)
+
+
+@router.get("/{document_id}/content")
+def get_document_content(
+    document_id: str,
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
+) -> Response:
+    payload = operations_service.get_document_content(auth_context.tenant.id, document_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    content = payload["content"]
+    return Response(
+        content=content,
+        media_type=payload["content_type"],
+        headers={
+            "Content-Disposition": _inline_content_disposition(payload["filename"]),
+            "Content-Length": str(len(content)),
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/{document_id}/exception-summary", response_model=DocumentExceptionSummaryResponse)
