@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class BoundingBoxModel(BaseModel):
@@ -71,9 +71,12 @@ class DemographicModel(BaseModel):
 
 
 class CourseTranscriptModel(BaseModel):
-    subject: str = ""
-    courseId: str = ""
-    courseTitle: str = ""
+    model_config = ConfigDict(populate_by_name=True)
+
+    subject: str = Field(default="", validation_alias=AliasChoices("subject", "Subject"), serialization_alias="Subject")
+    courseId: str = Field(default="", validation_alias=AliasChoices("courseId", "CourseId"), serialization_alias="CourseId")
+    courseTitle: str = Field(default="", validation_alias=AliasChoices("courseTitle", "CourseTitle"), serialization_alias="CourseTitle")
+    courseNumber: str = Field(default="", validation_alias=AliasChoices("courseNumber", "Course Number"), serialization_alias="Course Number")
     credit: str = ""
     grade: str = ""
     gradePoints: str = ""

@@ -1450,8 +1450,7 @@ class Student360Service:
         return transcripts[0].institution if transcripts else "Unknown institution"
 
     def _filter_course_fields(self, course: dict[str, Any]) -> dict[str, Any]:
-        allowed = {"courseId", "courseTitle", "term", "year", "credit", "grade", "subject", "creditAttempted"}
-        return {key: value for key, value in course.items() if key in allowed}
+        return dict(course)
 
     def _default_transcript_note(self, transcript: Transcript) -> str:
         if transcript.status == "failed":

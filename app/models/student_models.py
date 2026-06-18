@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class StudentChecklistItem(BaseModel):
@@ -39,13 +39,16 @@ class StudentTimelineStep(BaseModel):
 
 
 class StudentTranscriptCourse(BaseModel):
-    courseId: str | None = None
-    courseTitle: str | None = None
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    courseId: str | None = Field(default=None, validation_alias=AliasChoices("courseId", "CourseId"), serialization_alias="CourseId")
+    courseTitle: str | None = Field(default=None, validation_alias=AliasChoices("courseTitle", "CourseTitle"), serialization_alias="CourseTitle")
+    courseNumber: str | None = Field(default=None, validation_alias=AliasChoices("courseNumber", "Course Number"), serialization_alias="Course Number")
     term: str | None = None
     year: str | None = None
     credit: str | float | int | None = None
     grade: str | None = None
-    subject: str | None = None
+    subject: str | None = Field(default=None, validation_alias=AliasChoices("subject", "Subject"), serialization_alias="Subject")
     creditAttempted: str | float | int | None = None
 
 

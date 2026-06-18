@@ -224,6 +224,77 @@ def test_parse_endpoint_uses_external_extraction_service_when_configured(monkeyp
     assert persist_calls[0]["response_payload"]["documentId"] == "remote-doc-123"
 
 
+def test_parse_response_preserves_extractor_course_fields():
+    from app.models.api_models import ParseTranscriptResponse
+
+    parsed = ParseTranscriptResponse(
+        **{
+            "documentId": "doc-1",
+            "demographic": {"firstName": "Jessica", "lastName": "Newman", "studentId": "243263913"},
+            "courses": [
+                {
+                    "Subject": "MKTG",
+                    "CourseId": "MKTG 305",
+                    "CourseTitle": "Marketing",
+                    "Course Number": "305",
+                    "credit": "3",
+                    "grade": "B",
+                    "gradePoints": "3",
+                    "term": "Fall",
+                    "year": "2021",
+                    "courseLevel": "300",
+                }
+            ],
+            "gradePointMap": [],
+            "grandGPA": {},
+            "termGPAs": [],
+            "audit": [],
+            "metadata": {},
+        }
+    )
+
+    course = parsed.courses[0]
+    assert course.subject == "MKTG"
+    assert course.courseId == "MKTG 305"
+    assert course.courseTitle == "Marketing"
+    assert course.courseNumber == "305"
+
+    payload = parsed.model_dump(mode="json", by_alias=True)
+    assert payload["courses"][0]["Subject"] == "MKTG"
+    assert payload["courses"][0]["CourseId"] == "MKTG 305"
+    assert payload["courses"][0]["CourseTitle"] == "Marketing"
+    assert payload["courses"][0]["Course Number"] == "305"
+
+
+def test_student_transcript_course_preserves_full_extractor_course_payload():
+    from app.models.student_models import StudentTranscriptCourse
+
+    course = StudentTranscriptCourse(
+        **{
+            "Subject": "MKTG",
+            "CourseId": "MKTG 305",
+            "CourseTitle": "Marketing",
+            "Course Number": "305",
+            "credit": "3",
+            "grade": "B",
+            "confidenceScore": 95,
+            "boundingBox": {"left": 0.1, "top": 0.2, "width": 0.3, "height": 0.4},
+            "mappingStatus": "mapped",
+            "equlCourseCode": None,
+        }
+    )
+
+    payload = course.model_dump(mode="json", by_alias=True)
+    assert payload["Subject"] == "MKTG"
+    assert payload["CourseId"] == "MKTG 305"
+    assert payload["CourseTitle"] == "Marketing"
+    assert payload["Course Number"] == "305"
+    assert payload["confidenceScore"] == 95
+    assert payload["boundingBox"]["left"] == 0.1
+    assert payload["mappingStatus"] == "mapped"
+    assert "equlCourseCode" in payload
+
+
 def test_start_transcript_upload_returns_processing_ids(monkeypatch):
     from app.api import routes
 
