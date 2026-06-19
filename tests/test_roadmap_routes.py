@@ -87,3 +87,60 @@ def test_connector_and_reporting_routes_return_backend_shapes(monkeypatch):
     assert connectors.json()["items"][0]["id"] == "salesforce"
     assert operational.status_code == 200
     assert operational.json()["type"] == "operational"
+
+
+def test_counselor_root_routes_return_backend_shapes(monkeypatch):
+    from app.api import roadmap_routes
+
+    monkeypatch.setattr(
+        roadmap_routes.roadmap_service,
+        "communication_templates",
+        lambda tenant_id: {"items": [{"id": "tmpl_missing_transcript", "key": "missing_transcript", "active": True}], "total": 1},
+    )
+    monkeypatch.setattr(
+        roadmap_routes.roadmap_service,
+        "list_handoffs",
+        lambda tenant_id, limit=100, offset=0: {"items": [{"id": "handoff-1", "status": "Open"}], "total": 1, "limit": limit, "offset": offset},
+    )
+    monkeypatch.setattr(
+        roadmap_routes.roadmap_service,
+        "update_handoff_status",
+        lambda db, tenant_id, actor_user_id, handoff_id, payload: {"handoff": {"id": handoff_id, "status": payload["status"]}},
+    )
+    monkeypatch.setattr(
+        roadmap_routes.roadmap_service,
+        "counselor_reporting",
+        lambda tenant_id, report_type, filters: {"type": report_type, "metrics": {"handoffs": {"openCount": 1}}, "filters": filters},
+    )
+    monkeypatch.setattr(
+        roadmap_routes.roadmap_service,
+        "recruitment_events",
+        lambda tenant_id: {"items": [{"id": "event-1", "eventType": "Webinar"}], "total": 1},
+    )
+    monkeypatch.setattr(
+        roadmap_routes.roadmap_service,
+        "add_recruitment_attendee",
+        lambda tenant_id, actor_user_id, event_id, payload: {"event": {"id": event_id}, "attendee": payload},
+    )
+
+    client = TestClient(_build_test_app())
+
+    templates = client.get("/api/v1/communication/templates")
+    handoffs = client.get("/api/v1/handoffs")
+    handoff_status = client.post("/api/v1/handoffs/handoff-1/status", json={"status": "Complete"})
+    reporting = client.get("/api/v1/reporting/funnel?program=BSN")
+    events = client.get("/api/v1/recruitment/events")
+    attendee = client.post("/api/v1/recruitment/events/event-1/attendees", json={"studentId": "STU-123"})
+
+    assert templates.status_code == 200
+    assert templates.json()["items"][0]["key"] == "missing_transcript"
+    assert handoffs.status_code == 200
+    assert handoffs.json()["items"][0]["id"] == "handoff-1"
+    assert handoff_status.status_code == 200
+    assert handoff_status.json()["handoff"]["status"] == "Complete"
+    assert reporting.status_code == 200
+    assert reporting.json()["type"] == "funnel"
+    assert events.status_code == 200
+    assert events.json()["items"][0]["id"] == "event-1"
+    assert attendee.status_code == 200
+    assert attendee.json()["event"]["id"] == "event-1"

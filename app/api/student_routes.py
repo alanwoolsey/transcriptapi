@@ -1,10 +1,24 @@
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import AuthenticatedTenantContext, require_permission
 from app.db import get_db
 from app.models.ops_models import ChecklistStatusUpdateRequest, StudentChecklistResponse, StudentReadinessResponse
-from app.models.student_models import Student360DetailResponse, Student360ListResponse, StudentTimelineResponse
+from app.models.student_models import (
+    Student360DetailResponse,
+    Student360ListResponse,
+    StudentInteractionCreateRequest,
+    StudentInteractionCreateResponse,
+    StudentInteractionUpdateRequest,
+    StudentInteractionsListResponse,
+    StudentNextActionRequest,
+    StudentNextActionResponse,
+    StudentProgramUpdateRequest,
+    StudentProgramUpdateResponse,
+    StudentTimelineResponse,
+)
 from app.services.admissions_ops_service import AdmissionsOpsNotFoundError, AdmissionsOpsService, AdmissionsOpsValidationError
 from app.services.student_360_service import Student360Service
 
@@ -51,6 +65,183 @@ def get_student(
     if record is None:
         raise HTTPException(status_code=404, detail="Student not found")
     return Student360DetailResponse(student=record)
+
+
+@router.patch("/{student_id}", response_model=StudentProgramUpdateResponse)
+def update_student(
+    student_id: str,
+    payload: StudentProgramUpdateRequest,
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
+    db: Session = Depends(get_db),
+) -> StudentProgramUpdateResponse:
+    try:
+        program_name = payload.degreeProgram or payload.program
+        return student_service.update_student_program(
+            db=db,
+            tenant_id=auth_context.tenant.id,
+            actor_user_id=auth_context.user.id,
+            student_id=student_id,
+            program_name=program_name,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/{student_id}/next-action", response_model=StudentNextActionResponse)
+def record_student_next_action(
+    student_id: str,
+    payload: StudentNextActionRequest,
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
+    db: Session = Depends(get_db),
+) -> StudentNextActionResponse:
+    try:
+        return student_service.record_next_action(
+            db=db,
+            tenant_id=auth_context.tenant.id,
+            actor_user_id=auth_context.user.id,
+            student_id=student_id,
+            payload=payload,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/{student_id}/interactions", response_model=StudentInteractionCreateResponse)
+def create_student_interaction(
+    student_id: str,
+    payload: StudentInteractionCreateRequest,
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
+    db: Session = Depends(get_db),
+) -> StudentInteractionCreateResponse:
+    try:
+        return student_service.create_student_interaction(
+            db=db,
+            tenant_id=auth_context.tenant.id,
+            actor_user_id=auth_context.user.id,
+            student_id=student_id,
+            payload=payload,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/{student_id}/interactions", response_model=StudentInteractionsListResponse)
+def list_student_interactions(
+    student_id: str,
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
+) -> StudentInteractionsListResponse:
+    try:
+        return student_service.list_student_interactions(
+            tenant_id=auth_context.tenant.id,
+            student_id=student_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.patch("/{student_id}/interactions/{interaction_id}", response_model=StudentInteractionCreateResponse)
+def update_student_interaction(
+    student_id: str,
+    interaction_id: str,
+    payload: StudentInteractionUpdateRequest,
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
+    db: Session = Depends(get_db),
+) -> StudentInteractionCreateResponse:
+    try:
+        return student_service.update_student_interaction(
+            db=db,
+            tenant_id=auth_context.tenant.id,
+            actor_user_id=auth_context.user.id,
+            student_id=student_id,
+            interaction_id=interaction_id,
+            payload=payload,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/{student_id}/communications/log")
+def log_student_communication(
+    student_id: str,
+    payload: dict[str, Any],
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return student_service.log_student_communication(
+            db=db,
+            tenant_id=auth_context.tenant.id,
+            actor_user_id=auth_context.user.id,
+            student_id=student_id,
+            payload=payload,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/{student_id}/handoffs")
+def create_student_handoff(
+    student_id: str,
+    payload: dict[str, Any],
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return student_service.create_student_handoff(
+            db=db,
+            tenant_id=auth_context.tenant.id,
+            actor_user_id=auth_context.user.id,
+            student_id=student_id,
+            payload=payload,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/{student_id}/post-admit-readiness")
+def get_post_admit_readiness(
+    student_id: str,
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
+) -> dict[str, Any]:
+    try:
+        return student_service.get_post_admit_readiness(auth_context.tenant.id, student_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{student_id}/milestones/{milestone_id}/status")
+def update_post_admit_milestone(
+    student_id: str,
+    milestone_id: str,
+    payload: dict[str, Any],
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return student_service.update_post_admit_milestone(
+            db=db,
+            tenant_id=auth_context.tenant.id,
+            actor_user_id=auth_context.user.id,
+            student_id=student_id,
+            milestone_id=milestone_id,
+            payload=payload,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/{student_id}/timeline", response_model=StudentTimelineResponse, response_model_exclude_none=True)

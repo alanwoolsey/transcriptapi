@@ -36,6 +36,7 @@ from app.models.prospect_models import (
     ProspectUploadResponse,
     ProspectUploadStatusResponse,
 )
+from app.services.pipeline_status import canonical_pipeline_status
 
 
 class ProspectNotFoundError(Exception):
@@ -534,12 +535,14 @@ class ProspectService:
     def _build_work_item(self, prospect: Prospect, action: ProspectNextAction, fit: ProspectFitResult | None, owner: AppUser | None) -> WorkTodayItemResponse:
         reason_code = self._reason_code(prospect, fit)
         queue_group = self._queue_group(prospect, reason_code)
+        pipeline_status = canonical_pipeline_status(prospect.lifecycle_stage)
         return WorkTodayItemResponse(
             id=f"prospect_{prospect.id.hex[:12]}",
             studentId=self._public_id("pro", prospect.id),
             studentName=f"{prospect.first_name} {prospect.last_name}".strip(),
             population=prospect.population,
-            stage=prospect.lifecycle_stage,
+            stage=pipeline_status,
+            pipelineStatus=pipeline_status,
             completionPercent=0,
             section="attention",
             priority="urgent" if queue_group in {"new_inquiries", "duplicate_candidate"} else "today",
@@ -554,6 +557,7 @@ class ProspectService:
             institutionGoal=prospect.prior_institution or "Prior institution pending",
             risk="Medium" if prospect.status == "duplicate_candidate" else "Low",
             lastActivity=self._relative_time(prospect.updated_at),
+            nextAction=action.label,
             currentOwnerAgent=None,
             currentStage=prospect.lifecycle_stage,
             recommendedAgent="document_agent" if action.code in {"upload_transcript", "review_transfer_fit"} else "decision_agent",

@@ -93,6 +93,7 @@ class WorkItemResponse(BaseModel):
     studentName: str
     population: str
     stage: str
+    pipelineStatus: str | None = None
     completionPercent: int
     priority: str
     priorityScore: int | None = None
@@ -109,6 +110,10 @@ class WorkItemResponse(BaseModel):
     institutionGoal: str
     risk: str
     lastActivity: str
+    lastContactedAt: str | None = None
+    nextFollowUpAt: str | None = None
+    nextAction: str | None = None
+    contactOutcome: str | None = None
     updatedAt: str | None = None
 
 
@@ -132,6 +137,7 @@ class WorkTodayItemResponse(BaseModel):
     studentName: str
     population: str | None = None
     stage: str | None = None
+    pipelineStatus: str | None = None
     completionPercent: int | None = None
     section: str
     priority: str
@@ -146,10 +152,16 @@ class WorkTodayItemResponse(BaseModel):
     institutionGoal: str | None = None
     risk: str | None = None
     lastActivity: str | None = None
+    lastActivityAt: str | None = None
+    lastContactedAt: str | None = None
+    nextFollowUpAt: str | None = None
+    nextAction: str | None = None
+    contactOutcome: str | None = None
     currentOwnerAgent: str | None = None
     currentStage: str | None = None
     recommendedAgent: str | None = None
     queueGroup: str | None = None
+    routeHint: dict | None = None
     documentAgent: WorkTodayAgentSummary | None = None
     trustAgent: WorkTodayAgentSummary | None = None
     decisionAgent: WorkTodayAgentSummary | None = None
@@ -159,6 +171,17 @@ class WorkTodayItemResponse(BaseModel):
 class WorkTodayResponse(BaseModel):
     items: list[WorkTodayItemResponse] = Field(default_factory=list)
     total: int
+
+
+class WorkCounselorTodayBucket(BaseModel):
+    key: str
+    label: str
+    meaning: str
+    items: list[WorkTodayItemResponse] = Field(default_factory=list)
+
+
+class WorkCounselorTodayResponse(BaseModel):
+    buckets: list[WorkCounselorTodayBucket] = Field(default_factory=list)
 
 
 class WorkTodayGroupRouteHint(BaseModel):

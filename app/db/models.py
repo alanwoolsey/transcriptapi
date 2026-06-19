@@ -769,6 +769,31 @@ Index("ix_student_tasks_tenant_student_status", StudentTask.tenant_id, StudentTa
 Index("ix_student_tasks_tenant_assigned_status", StudentTask.tenant_id, StudentTask.assigned_to_user_id, StudentTask.status)
 
 
+class StudentInteraction(Base):
+    __tablename__ = "student_interactions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    type: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text)
+    next_action: Mapped[str | None] = mapped_column(Text)
+    next_follow_up_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    occurred_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    actor_name: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_interactions_tenant_student_occurred_desc", StudentInteraction.tenant_id, StudentInteraction.student_id, StudentInteraction.occurred_at.desc())
+Index("ix_student_interactions_tenant_type", StudentInteraction.tenant_id, StudentInteraction.type)
+
+
 class ChecklistTemplate(Base):
     __tablename__ = "checklist_templates"
 

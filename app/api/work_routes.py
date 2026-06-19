@@ -4,6 +4,7 @@ from app.api.dependencies import AuthenticatedTenantContext, require_permission
 from app.db import get_db
 from app.models.ops_models import (
     WorkItemsResponse,
+    WorkCounselorTodayResponse,
     WorkProjectionJobResponse,
     WorkProjectionJobsResponse,
     WorkProjectionRebuildResponse,
@@ -98,6 +99,14 @@ def get_today_work_board(
     auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
 ) -> WorkTodayBoardResponse:
     return admissions_ops_service.get_today_work_board(auth_context.tenant.id, limit=limit)
+
+
+@router.get("/counselor/today", response_model=WorkCounselorTodayResponse)
+def get_counselor_today_work(
+    limit: int = Query(default=100, ge=1, le=200),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
+) -> WorkCounselorTodayResponse:
+    return admissions_ops_service.get_counselor_today_work(auth_context.tenant.id, limit=limit)
 
 
 @router.post("/today/orchestrate", response_model=WorkTodayOrchestrationResponse)

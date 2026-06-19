@@ -312,6 +312,52 @@ def test_get_today_work_board_returns_grouped_payload(monkeypatch):
     assert payload["groups"][0]["routeHint"]["nextAgent"] == "decision_agent"
 
 
+def test_get_counselor_today_work_returns_buckets(monkeypatch):
+    from app.api import work_routes
+
+    monkeypatch.setattr(
+        work_routes.admissions_ops_service,
+        "get_counselor_today_work",
+        lambda tenant_id, limit=100: {
+            "buckets": [
+                {
+                    "key": "incomplete",
+                    "label": "Incomplete",
+                    "meaning": "Missing transcript, essay, fee, etc.",
+                    "items": [
+                        {
+                            "id": "work_123",
+                            "studentId": "student-1",
+                            "studentName": "Mira Holloway",
+                            "pipelineStatus": "Incomplete",
+                            "stage": "Incomplete",
+                            "section": "attention",
+                            "priority": "today",
+                            "owner": {"id": "usr_42", "name": "Elian Brooks"},
+                            "reasonToAct": {"code": "missing_items", "label": "Missing transcript"},
+                            "suggestedAction": {"code": "request_document", "label": "Request transcript"},
+                            "blockingItems": [],
+                            "nextAction": "Request transcript",
+                            "lastContactedAt": "2026-06-18T14:30:00.000Z",
+                            "nextFollowUpAt": "2026-06-20T14:00:00.000Z",
+                            "contactOutcome": "left_message",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.get("/api/v1/work/counselor/today?limit=100")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["buckets"][0]["key"] == "incomplete"
+    assert payload["buckets"][0]["items"][0]["pipelineStatus"] == "Incomplete"
+    assert payload["buckets"][0]["items"][0]["nextAction"] == "Request transcript"
+
+
 def test_orchestrate_today_work_returns_run_and_grouped_payload(monkeypatch):
     from app.api import work_routes
 

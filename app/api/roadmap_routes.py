@@ -258,6 +258,30 @@ def update_handoff_status(student_id: str, payload: RoadmapActionRequest, auth_c
     return _handle_errors(lambda: roadmap_service.update_student_status(auth_context.tenant.id, auth_context.user.id, student_id, "handoff", payload))
 
 
+@router.get("/handoffs")
+def list_handoffs(
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
+) -> dict[str, Any]:
+    return roadmap_service.list_handoffs(auth_context.tenant.id, limit=limit, offset=offset)
+
+
+@router.post("/handoffs/{handoff_id}/status")
+def update_global_handoff_status(
+    handoff_id: str,
+    payload: dict[str, Any],
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return roadmap_service.update_handoff_status(db, auth_context.tenant.id, auth_context.user.id, handoff_id, payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/sync-errors", response_model=ItemsResponse)
 def sync_errors(q: str | None = Query(default=None), limit: int = Query(default=50, ge=1, le=200), offset: int = Query(default=0, ge=0), auth_context: AuthenticatedTenantContext = Depends(require_permission("manage_integrations"))) -> ItemsResponse:
     return roadmap_service.sync_errors(auth_context.tenant.id, q=q, limit=limit, offset=offset)
@@ -303,6 +327,11 @@ def save_connector_mappings(connector_id: str, payload: ConnectorMappingsPayload
     return roadmap_service.save_connector_mappings(auth_context.tenant.id, auth_context.user.id, connector_id, payload)
 
 
+@router.get("/communication/templates")
+def communication_templates(auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360"))) -> dict[str, Any]:
+    return roadmap_service.communication_templates(auth_context.tenant.id)
+
+
 @router.get("/sync/runs", response_model=ItemsResponse)
 def sync_runs(q: str | None = Query(default=None), limit: int = Query(default=50, ge=1, le=200), offset: int = Query(default=0, ge=0), auth_context: AuthenticatedTenantContext = Depends(require_permission("manage_integrations"))) -> ItemsResponse:
     return roadmap_service.sync_errors(auth_context.tenant.id, q=q, limit=limit, offset=offset)
@@ -336,6 +365,59 @@ def reporting_benchmarks(q: str | None = Query(default=None), limit: int = Query
 @router.get("/reporting/drilldown")
 def reporting_drilldown(q: str | None = Query(default=None), limit: int = Query(default=50, ge=1, le=200), offset: int = Query(default=0, ge=0), auth_context: AuthenticatedTenantContext = Depends(require_permission("view_dashboards"))) -> dict[str, Any]:
     return roadmap_service.reporting(auth_context.tenant.id, "drilldown", q=q, limit=limit, offset=offset)
+
+
+@router.get("/reporting/funnel")
+def reporting_funnel(
+    dateRange: str | None = Query(default=None),
+    counselor: str | None = Query(default=None),
+    owner: str | None = Query(default=None),
+    program: str | None = Query(default=None),
+    population: str | None = Query(default=None),
+    source: str | None = Query(default=None),
+    territory: str | None = Query(default=None),
+    pipelineStage: str | None = Query(default=None),
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_dashboards")),
+) -> dict[str, Any]:
+    return roadmap_service.counselor_reporting(
+        auth_context.tenant.id,
+        "funnel",
+        {
+            "dateRange": dateRange,
+            "counselor": counselor,
+            "owner": owner,
+            "program": program,
+            "population": population,
+            "source": source,
+            "territory": territory,
+            "pipelineStage": pipelineStage,
+        },
+    )
+
+
+@router.get("/reporting/stage-aging")
+def reporting_stage_aging(auth_context: AuthenticatedTenantContext = Depends(require_permission("view_dashboards"))) -> dict[str, Any]:
+    return roadmap_service.counselor_reporting(auth_context.tenant.id, "stage-aging", {})
+
+
+@router.get("/reporting/counselor-workload")
+def reporting_counselor_workload(auth_context: AuthenticatedTenantContext = Depends(require_permission("view_dashboards"))) -> dict[str, Any]:
+    return roadmap_service.counselor_reporting(auth_context.tenant.id, "counselor-workload", {})
+
+
+@router.get("/reporting/handoffs")
+def reporting_handoffs(auth_context: AuthenticatedTenantContext = Depends(require_permission("view_dashboards"))) -> dict[str, Any]:
+    return roadmap_service.counselor_reporting(auth_context.tenant.id, "handoffs", {})
+
+
+@router.get("/recruitment/events")
+def recruitment_events(auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360"))) -> dict[str, Any]:
+    return roadmap_service.recruitment_events(auth_context.tenant.id)
+
+
+@router.post("/recruitment/events/{event_id}/attendees")
+def add_recruitment_attendee(event_id: str, payload: dict[str, Any], auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360"))) -> dict[str, Any]:
+    return _handle_errors(lambda: roadmap_service.add_recruitment_attendee(auth_context.tenant.id, auth_context.user.id, event_id, payload))
 
 
 @router.get("/graduate/program-queues", response_model=ItemsResponse)

@@ -19,12 +19,15 @@ from app.db.models import (
     Prospect,
     ProspectSourceReference,
     Student,
+    StudentAgentState,
     StudentChecklistItem as DbStudentChecklistItem,
     StudentDecisionReadiness,
     StudentEnrollmentMilestone,
+    StudentInteraction,
     StudentNote,
     StudentTask,
     StudentYieldScore,
+    StudentWorkState,
     Transcript,
     TranscriptDemographics,
     TranscriptParseRun,
@@ -36,6 +39,7 @@ from app.models.student_models import (
     Student360ListResponse,
     Student360Record,
     StudentChecklistItem,
+    StudentInteractionRecord,
     StudentOwnerSummary,
     StudentProgramSummary,
     StudentRecommendation,
@@ -54,6 +58,7 @@ from app.services.rbac_service import (
     SENSITIVITY_TRANSCRIPT_IMAGES,
     SENSITIVITY_TRUST_FRAUD_FLAGS,
 )
+from app.services.pipeline_status import canonical_pipeline_status
 from app.services.student_resolution import StudentResolutionService
 
 
@@ -66,6 +71,30 @@ class _TranscriptBundle:
 
 
 class Student360Service:
+    VALID_INTERACTION_TYPES = {
+        "call",
+        "text",
+        "email",
+        "meeting",
+        "family_conversation",
+        "campus_visit",
+        "webinar",
+        "note",
+        "communication",
+        "handoff",
+        "post_admit",
+        "recruitment_event",
+    }
+    VALID_INTERACTION_OUTCOMES = {
+        "reached_student",
+        "left_message",
+        "no_response",
+        "needs_follow_up",
+        "not_interested",
+        "ready_to_apply",
+        "ready_to_deposit",
+    }
+
     def __init__(self, session_factory=None) -> None:
         self.session_factory = session_factory or get_session_factory
         self.student_resolution = StudentResolutionService()
@@ -130,6 +159,561 @@ class Student360Service:
                 return StudentTimelineResponse(events=self._build_transcript_derived_timeline(session, tenant_id, student_id, authorization))
             events = self._build_canonical_timeline(session, tenant_id, student, authorization)
             return StudentTimelineResponse(events=events)
+
+    def create_student_interaction(
+        self,
+        db: Session,
+        tenant_id: UUID,
+        actor_user_id: UUID,
+        student_id: str,
+        payload: Any,
+    ) -> dict[str, StudentInteractionRecord]:
+        student = self._resolve_student_row(db, tenant_id, student_id)
+        if student is None:
+            raise LookupError("Student not found.")
+
+        interaction_type = (payload.type or "").strip().lower()
+        if interaction_type not in self.VALID_INTERACTION_TYPES:
+            raise ValueError("Invalid interaction type.")
+        outcome = (payload.outcome or "").strip().lower() if payload.outcome else None
+        if outcome and outcome not in self.VALID_INTERACTION_OUTCOMES:
+            raise ValueError("Invalid interaction outcome.")
+
+        occurred_at = self._parse_client_datetime(payload.occurredAt) if payload.occurredAt else datetime.now(timezone.utc)
+        next_follow_up_at = self._parse_client_datetime(payload.nextFollowUpAt) if payload.nextFollowUpAt else None
+        title = (payload.title or "").strip() or self._title_case(interaction_type)
+        note = (payload.note or "").strip() or None
+        description = (payload.description or "").strip() or note
+        next_action = (payload.nextAction or "").strip() or None
+        actor_name = (payload.actor or "").strip() or self._actor_name_for_user(db, actor_user_id) or "User"
+        source = (payload.source or "").strip() or "student_360"
+        now = datetime.now(timezone.utc)
+
+        interaction = StudentInteraction(
+            tenant_id=tenant_id,
+            student_id=student.id,
+            type=interaction_type,
+            outcome=outcome,
+            title=title,
+            note=note,
+            description=description,
+            next_action=next_action,
+            next_follow_up_at=next_follow_up_at,
+            occurred_at=occurred_at,
+            actor_user_id=actor_user_id,
+            actor_name=actor_name,
+            source=source,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(interaction)
+        db.flush()
+
+        state_updates: dict[str, str | None] = {
+            "contactOutcome": outcome,
+            "lastActivity": "Just now",
+        }
+        if interaction_type != "note":
+            state_updates["lastContactedAt"] = self._format_timestamp(occurred_at)
+        if next_follow_up_at is not None:
+            state_updates["nextFollowUpAt"] = self._format_timestamp(next_follow_up_at)
+        if next_action is not None:
+            state_updates["nextAction"] = next_action
+        self._update_student_counselor_state(
+            db,
+            tenant_id=tenant_id,
+            student=student,
+            occurred_at=occurred_at,
+            updated_at=now,
+            state_updates=state_updates,
+        )
+
+        metadata = {
+            "type": interaction_type,
+            "outcome": outcome,
+            "nextAction": next_action,
+            "nextFollowUpAt": state_updates.get("nextFollowUpAt"),
+            "interactionId": str(interaction.id),
+        }
+        self._write_student_audit(db, tenant_id=tenant_id, actor_user_id=actor_user_id, student_id=student.id, action="student_interaction_created", metadata=metadata, occurred_at=occurred_at)
+        if next_action is not None:
+            self._write_student_audit(db, tenant_id=tenant_id, actor_user_id=actor_user_id, student_id=student.id, action="student_next_action_updated", metadata=metadata, occurred_at=occurred_at)
+        if next_follow_up_at is not None:
+            self._write_student_audit(db, tenant_id=tenant_id, actor_user_id=actor_user_id, student_id=student.id, action="student_next_follow_up_updated", metadata=metadata, occurred_at=occurred_at)
+        if interaction_type != "note":
+            self._write_student_audit(db, tenant_id=tenant_id, actor_user_id=actor_user_id, student_id=student.id, action="student_contact_logged", metadata=metadata, occurred_at=occurred_at)
+
+        db.commit()
+        return {"interaction": self._serialize_interaction(interaction)}
+
+    def list_student_interactions(self, tenant_id: UUID, student_id: str) -> dict[str, list[StudentInteractionRecord]]:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            student = self._resolve_student_row(session, tenant_id, student_id)
+            if student is None:
+                raise LookupError("Student not found.")
+            interactions = session.execute(
+                select(StudentInteraction)
+                .where(StudentInteraction.tenant_id == tenant_id, StudentInteraction.student_id == student.id)
+                .order_by(StudentInteraction.occurred_at.desc(), StudentInteraction.created_at.desc())
+            ).scalars().all()
+            return {"items": [self._serialize_interaction(interaction) for interaction in interactions]}
+
+    def log_student_communication(self, db: Session, tenant_id: UUID, actor_user_id: UUID, student_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        interaction_payload = type(
+            "CommunicationPayload",
+            (),
+            {
+                "type": "communication",
+                "outcome": payload.get("outcome") or "needs_follow_up",
+                "title": payload.get("templateLabel") or payload.get("templateKey") or payload.get("subject") or "Communication",
+                "note": payload.get("message"),
+                "description": payload.get("message"),
+                "nextAction": payload.get("nextAction"),
+                "nextFollowUpAt": payload.get("nextFollowUpAt"),
+                "occurredAt": payload.get("occurredAt"),
+                "actor": payload.get("actor"),
+                "source": payload.get("source") or "student_360",
+            },
+        )()
+        created = self.create_student_interaction(db, tenant_id, actor_user_id, student_id, interaction_payload)["interaction"]
+        return {
+            "communication": {
+                **created.model_dump(mode="json"),
+                "channel": payload.get("channel") or "other",
+                "templateKey": payload.get("templateKey"),
+                "templateLabel": payload.get("templateLabel"),
+                "subject": payload.get("subject"),
+                "message": payload.get("message"),
+                "status": payload.get("status") or "logged",
+                "providerMetadata": payload.get("providerMetadata") or {},
+            }
+        }
+
+    def get_post_admit_readiness(self, tenant_id: UUID, student_id: str) -> dict[str, Any]:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            student = self._resolve_student_row(session, tenant_id, student_id)
+            if student is None:
+                raise LookupError("Student not found.")
+            return {
+                "studentId": student.external_student_id or str(student.id),
+                "milestones": self._serialize_post_admit_milestones(session, tenant_id, student.id),
+            }
+
+    def update_post_admit_milestone(
+        self,
+        db: Session,
+        tenant_id: UUID,
+        actor_user_id: UUID,
+        student_id: str,
+        milestone_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        student = self._resolve_student_row(db, tenant_id, student_id)
+        if student is None:
+            raise LookupError("Student not found.")
+        allowed = {code for code, _label, _owner in self._post_admit_milestone_defs()}
+        if milestone_id not in allowed:
+            raise ValueError("Invalid milestone id.")
+        label = next(label for code, label, _owner in self._post_admit_milestone_defs() if code == milestone_id)
+        milestone = db.execute(
+            select(StudentEnrollmentMilestone)
+            .where(
+                StudentEnrollmentMilestone.tenant_id == tenant_id,
+                StudentEnrollmentMilestone.student_id == student.id,
+                StudentEnrollmentMilestone.milestone_code == milestone_id,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if milestone is None:
+            milestone = StudentEnrollmentMilestone(
+                tenant_id=tenant_id,
+                student_id=student.id,
+                milestone_code=milestone_id,
+                milestone_label=payload.get("label") or label,
+                status="not_started",
+                metadata_json={},
+            )
+            db.add(milestone)
+            db.flush()
+        if payload.get("status"):
+            milestone.status = str(payload["status"]).lower().replace(" ", "_")
+        milestone.milestone_label = payload.get("label") or milestone.milestone_label
+        metadata = dict(milestone.metadata_json or {})
+        for key in ("owner", "dueAt", "blocker"):
+            if key in payload:
+                metadata[key] = payload.get(key)
+        milestone.metadata_json = metadata
+        milestone.updated_at = datetime.now(timezone.utc)
+        if milestone.status in {"complete", "completed"}:
+            milestone.achieved_at = milestone.achieved_at or milestone.updated_at
+        self._write_student_audit(db, tenant_id=tenant_id, actor_user_id=actor_user_id, student_id=student.id, action="student_post_admit_milestone_updated", metadata={"milestoneId": milestone_id, "status": milestone.status})
+        db.commit()
+        return {"milestone": self._serialize_post_admit_milestones(db, tenant_id, student.id)[0] if False else self._milestone_record(milestone)}
+
+    def create_student_handoff(
+        self,
+        db: Session,
+        tenant_id: UUID,
+        actor_user_id: UUID,
+        student_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        student = self._resolve_student_row(db, tenant_id, student_id)
+        if student is None:
+            raise LookupError("Student not found.")
+        now = datetime.now(timezone.utc)
+        due_at = self._parse_client_datetime(payload["dueAt"]) if payload.get("dueAt") else None
+        owner_id = self._uuid_or_none(payload.get("ownerId"))
+        task = StudentTask(
+            tenant_id=tenant_id,
+            student_id=student.id,
+            task_type=f"handoff:{payload.get('targetTeam') or 'Student Services'}",
+            label=payload.get("summary") or payload.get("blocker") or "Cross-office handoff",
+            status=payload.get("status") or "Open",
+            assigned_to_user_id=owner_id,
+            due_at=due_at,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(task)
+        db.flush()
+        metadata = {
+            "targetTeam": payload.get("targetTeam") or "Student Services",
+            "owner": payload.get("owner"),
+            "ownerId": payload.get("ownerId"),
+            "priority": payload.get("priority") or "Normal",
+            "blocker": payload.get("blocker"),
+            "summary": task.label,
+            "createdBy": self._actor_name_for_user(db, actor_user_id) or str(actor_user_id),
+        }
+        self._merge_handoff_metadata(db, tenant_id, student.id, str(task.id), metadata)
+        self._write_student_audit(db, tenant_id=tenant_id, actor_user_id=actor_user_id, student_id=student.id, action="student_handoff_created", metadata={"handoffId": str(task.id), **metadata})
+        db.commit()
+        task._metadata_json = metadata
+        return {"handoff": self._serialize_handoff_task(task, self._load_actor_map(db, tenant_id))}
+
+    def update_handoff_status(self, db: Session, tenant_id: UUID, actor_user_id: UUID, handoff_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        handoff_uuid = self._uuid_or_none(handoff_id)
+        if handoff_uuid is None:
+            raise LookupError("Handoff not found.")
+        task = db.execute(
+            select(StudentTask).where(StudentTask.tenant_id == tenant_id, StudentTask.id == handoff_uuid, StudentTask.task_type.ilike("%handoff%")).limit(1)
+        ).scalar_one_or_none()
+        if task is None:
+            raise LookupError("Handoff not found.")
+        previous_status = task.status
+        task.status = payload.get("status") or task.status
+        task.updated_at = datetime.now(timezone.utc)
+        if task.status.lower() in {"complete", "completed"}:
+            task.completed_at = task.completed_at or task.updated_at
+        metadata = {}
+        if payload.get("ownerId") or payload.get("owner") or payload.get("priority") or payload.get("blocker"):
+            metadata = {k: payload.get(k) for k in ("owner", "ownerId", "priority", "blocker") if payload.get(k) is not None}
+            self._merge_handoff_metadata(db, tenant_id, task.student_id, str(task.id), metadata)
+        action = "student_handoff_completed" if task.completed_at else "student_handoff_status_changed"
+        self._write_student_audit(db, tenant_id=tenant_id, actor_user_id=actor_user_id, student_id=task.student_id, action=action, metadata={"handoffId": str(task.id), "previousStatus": previous_status, "status": task.status, **metadata})
+        db.commit()
+        task._metadata_json = self._handoff_metadata(db, tenant_id, task.student_id).get(str(task.id), {})
+        return {"handoff": self._serialize_handoff_task(task, self._load_actor_map(db, tenant_id))}
+
+    def list_handoffs(self, tenant_id: UUID, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            tasks = session.execute(
+                select(StudentTask)
+                .where(StudentTask.tenant_id == tenant_id, StudentTask.task_type.ilike("%handoff%"))
+                .order_by(StudentTask.updated_at.desc())
+                .offset(offset)
+                .limit(limit)
+            ).scalars().all()
+            actors = self._load_actor_map(session, tenant_id)
+            for task in tasks:
+                task._metadata_json = self._handoff_metadata(session, tenant_id, task.student_id).get(str(task.id), {})
+            return {"items": [self._serialize_handoff_task(task, actors) for task in tasks], "total": len(tasks), "limit": limit, "offset": offset}
+
+    def update_student_interaction(
+        self,
+        db: Session,
+        tenant_id: UUID,
+        actor_user_id: UUID,
+        student_id: str,
+        interaction_id: str,
+        payload: Any,
+    ) -> dict[str, StudentInteractionRecord]:
+        student = self._resolve_student_row(db, tenant_id, student_id)
+        if student is None:
+            raise LookupError("Student not found.")
+        try:
+            resolved_interaction_id = UUID(interaction_id)
+        except ValueError as exc:
+            raise LookupError("Interaction not found.") from exc
+        interaction = db.execute(
+            select(StudentInteraction)
+            .where(
+                StudentInteraction.tenant_id == tenant_id,
+                StudentInteraction.student_id == student.id,
+                StudentInteraction.id == resolved_interaction_id,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if interaction is None:
+            raise LookupError("Interaction not found.")
+
+        fields_set = getattr(payload, "model_fields_set", set()) or set()
+        if "type" in fields_set and payload.type is not None:
+            interaction_type = payload.type.strip().lower()
+            if interaction_type not in self.VALID_INTERACTION_TYPES:
+                raise ValueError("Invalid interaction type.")
+            interaction.type = interaction_type
+        if "outcome" in fields_set:
+            outcome = payload.outcome.strip().lower() if payload.outcome else None
+            if outcome and outcome not in self.VALID_INTERACTION_OUTCOMES:
+                raise ValueError("Invalid interaction outcome.")
+            interaction.outcome = outcome
+        if "title" in fields_set and payload.title is not None:
+            interaction.title = payload.title.strip() or self._title_case(interaction.type)
+        if "note" in fields_set:
+            interaction.note = payload.note.strip() if payload.note else None
+        if "description" in fields_set:
+            interaction.description = payload.description.strip() if payload.description else None
+        if "nextAction" in fields_set:
+            interaction.next_action = payload.nextAction.strip() if payload.nextAction else None
+        if "nextFollowUpAt" in fields_set:
+            interaction.next_follow_up_at = self._parse_client_datetime(payload.nextFollowUpAt) if payload.nextFollowUpAt else None
+        if "occurredAt" in fields_set and payload.occurredAt:
+            interaction.occurred_at = self._parse_client_datetime(payload.occurredAt)
+        if "actor" in fields_set:
+            interaction.actor_name = payload.actor.strip() if payload.actor else None
+        if "source" in fields_set and payload.source is not None:
+            interaction.source = payload.source.strip() or "student_360"
+        interaction.updated_at = datetime.now(timezone.utc)
+
+        state_updates: dict[str, str | None] = {
+            "contactOutcome": interaction.outcome,
+            "lastActivity": "Just now",
+        }
+        if interaction.type != "note":
+            state_updates["lastContactedAt"] = self._format_timestamp(interaction.occurred_at)
+        if interaction.next_follow_up_at is not None:
+            state_updates["nextFollowUpAt"] = self._format_timestamp(interaction.next_follow_up_at)
+        if interaction.next_action is not None:
+            state_updates["nextAction"] = interaction.next_action
+        self._update_student_counselor_state(
+            db,
+            tenant_id=tenant_id,
+            student=student,
+            occurred_at=interaction.occurred_at,
+            updated_at=interaction.updated_at,
+            state_updates=state_updates,
+        )
+
+        metadata = {
+            "type": interaction.type,
+            "outcome": interaction.outcome,
+            "nextAction": interaction.next_action,
+            "nextFollowUpAt": state_updates.get("nextFollowUpAt"),
+            "interactionId": str(interaction.id),
+        }
+        self._write_student_audit(
+            db,
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            student_id=student.id,
+            action="student_interaction_updated",
+            metadata=metadata,
+            occurred_at=interaction.updated_at,
+        )
+        db.commit()
+        return {"interaction": self._serialize_interaction(interaction)}
+
+    def update_student_program(self, db: Session, tenant_id: UUID, actor_user_id: UUID, student_id: str, program_name: str | None) -> dict[str, str]:
+        program_value = (program_name or "").strip()
+        if not program_value:
+            raise ValueError("Program is required.")
+        student = self._resolve_student_row(db, tenant_id, student_id)
+        if student is None:
+            raise LookupError("Student not found.")
+
+        program = db.execute(
+            select(Program)
+            .where(Program.tenant_id == tenant_id, Program.name == program_value)
+            .order_by(Program.created_at.asc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if program is None:
+            program = Program(tenant_id=tenant_id, institution_id=student.target_institution_id, name=program_value, is_active=True)
+            db.add(program)
+            db.flush()
+
+        previous_program_id = student.target_program_id
+        student.target_program_id = program.id
+        student.updated_at = datetime.now(timezone.utc)
+        student.latest_activity_at = student.updated_at
+
+        prospect = db.execute(
+            select(Prospect)
+            .where(Prospect.tenant_id == tenant_id, Prospect.student_id == student.id)
+            .order_by(Prospect.updated_at.desc(), Prospect.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if prospect is not None:
+            prospect.program_interest = program_value
+            prospect.updated_at = student.updated_at
+
+        projected = db.execute(
+            select(StudentWorkState)
+            .where(StudentWorkState.tenant_id == tenant_id, StudentWorkState.student_id == student.id)
+            .limit(1)
+        ).scalar_one_or_none()
+        if projected is not None:
+            projected.program = program_value
+            projected.last_activity_at = student.latest_activity_at
+            projected.updated_at = student.updated_at
+
+        self._write_student_audit(
+            db,
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            student_id=student.id,
+            action="student_program_updated",
+            metadata={
+                "previous_program_id": str(previous_program_id) if previous_program_id else None,
+                "program_id": str(program.id),
+                "program": program_value,
+            },
+        )
+        db.commit()
+        return {
+            "id": student.external_student_id or str(student.id),
+            "program": program_value,
+            "degreeProgram": program_value,
+            "stage": canonical_pipeline_status(student.current_stage),
+        }
+
+    def record_next_action(self, db: Session, tenant_id: UUID, actor_user_id: UUID, student_id: str, payload: Any) -> dict[str, str | None]:
+        action_type = (payload.actionType or "").strip().lower()
+        if action_type not in {"contacted", "follow_up", "request_document", "route_handoff"}:
+            raise ValueError("Invalid actionType.")
+        student = self._resolve_student_row(db, tenant_id, student_id)
+        if student is None:
+            raise LookupError("Student not found.")
+
+        now = datetime.now(timezone.utc)
+        last_contacted_at = self._parse_client_datetime(payload.lastContactedAt) if payload.lastContactedAt else None
+        next_follow_up_at = self._parse_client_datetime(payload.nextFollowUpAt) if payload.nextFollowUpAt else None
+        occurred_at = last_contacted_at or now
+        next_action = (payload.nextAction or "").strip() or None
+        contact_outcome = (payload.contactOutcome or "").strip() or None
+        owner_id = getattr(payload, "ownerId", None)
+        last_activity = (payload.lastActivity or "").strip() or "Just now"
+
+        existing_state = db.execute(
+            select(StudentAgentState)
+            .where(StudentAgentState.tenant_id == tenant_id, StudentAgentState.student_id == student.id)
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing_state is None:
+            existing_state = StudentAgentState(tenant_id=tenant_id, student_id=student.id)
+            db.add(existing_state)
+            db.flush()
+        state_json = dict(existing_state.state_json or {})
+        state_json.update(
+            {
+                "actionType": action_type,
+                "nextAction": next_action,
+                "nextFollowUpAt": self._format_timestamp(next_follow_up_at) if next_follow_up_at else None,
+                "lastContactedAt": self._format_timestamp(last_contacted_at) if last_contacted_at else state_json.get("lastContactedAt"),
+                "contactOutcome": contact_outcome,
+                "ownerId": owner_id,
+                "lastActivity": last_activity,
+            }
+        )
+        existing_state.state_json = state_json
+        existing_state.updated_at = now
+        owner_uuid = self._uuid_or_none(owner_id)
+        owner = db.get(AppUser, owner_uuid) if owner_uuid else None
+        if owner is not None and owner.tenant_id == tenant_id:
+            student.advisor_user_id = owner.id
+
+        if payload.note and payload.note.strip():
+            db.add(
+                StudentNote(
+                    tenant_id=tenant_id,
+                    student_id=student.id,
+                    transcript_id=None,
+                    author_user_id=actor_user_id,
+                    note_type=action_type,
+                    body=payload.note.strip(),
+                    is_internal=False,
+                    created_at=occurred_at,
+                    updated_at=occurred_at,
+                )
+            )
+
+        if next_action or next_follow_up_at:
+            db.add(
+                StudentTask(
+                    tenant_id=tenant_id,
+                    student_id=student.id,
+                    transcript_id=None,
+                    task_type=f"counselor_{action_type}",
+                    label=next_action or self._title_case(action_type),
+                    status="open",
+                    assigned_to_user_id=actor_user_id,
+                    due_at=next_follow_up_at,
+                    completed_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        student.latest_activity_at = occurred_at
+        student.updated_at = now
+        projected = db.execute(
+            select(StudentWorkState)
+            .where(StudentWorkState.tenant_id == tenant_id, StudentWorkState.student_id == student.id)
+            .limit(1)
+        ).scalar_one_or_none()
+        if projected is not None:
+            projected.last_activity_at = occurred_at
+            if owner is not None:
+                projected.owner_user_id = owner.id
+                projected.owner_name = owner.display_name
+            projected.updated_at = now
+        self._write_student_audit(
+            db,
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            student_id=student.id,
+            action="counselor_next_action_recorded",
+            metadata={
+                "actionType": action_type,
+                "note": payload.note,
+                "nextAction": next_action,
+                "contactOutcome": contact_outcome,
+                "ownerId": owner_id,
+                "lastContactedAt": state_json.get("lastContactedAt"),
+                "nextFollowUpAt": state_json.get("nextFollowUpAt"),
+                "lastActivity": last_activity,
+            },
+        )
+        if next_action is not None:
+            self._write_student_audit(db, tenant_id=tenant_id, actor_user_id=actor_user_id, student_id=student.id, action="student_next_action_updated", metadata={"nextAction": next_action}, occurred_at=occurred_at)
+        if next_follow_up_at is not None:
+            self._write_student_audit(db, tenant_id=tenant_id, actor_user_id=actor_user_id, student_id=student.id, action="student_next_follow_up_updated", metadata={"nextFollowUpAt": state_json.get("nextFollowUpAt")}, occurred_at=occurred_at)
+        if last_contacted_at is not None:
+            self._write_student_audit(db, tenant_id=tenant_id, actor_user_id=actor_user_id, student_id=student.id, action="student_contact_logged", metadata={"contactOutcome": contact_outcome, "lastContactedAt": state_json.get("lastContactedAt")}, occurred_at=occurred_at)
+        db.commit()
+        return {
+            "id": student.external_student_id or str(student.id),
+            "nextAction": next_action,
+            "nextFollowUpAt": state_json.get("nextFollowUpAt"),
+            "lastContactedAt": state_json.get("lastContactedAt"),
+            "contactOutcome": contact_outcome,
+            "lastActivity": last_activity,
+        }
 
     def _list_canonical_students(
         self,
@@ -199,6 +783,11 @@ class Student360Service:
         if not rows:
             return []
 
+        state_by_student = self._load_counselor_state(
+            session,
+            tenant_id,
+            [student.id for student, *_ in rows],
+        )
         records: list[Student360ListRecord] = []
         for student, program_row, institution, advisor, prospect, prospect_owner, transcripts_count, max_parser_confidence, latest_institution in rows:
             institution_goal = institution.name if institution else self._safe_str(latest_institution, "Unknown institution")
@@ -213,6 +802,8 @@ class Student360Service:
             )
             next_best_action = self._build_next_best_action(student.risk_level, student.current_stage, institution_goal)
             owner_summary = self._owner_summary(prospect_owner or advisor)
+            counselor_state = state_by_student.get(student.id, {})
+            recruitment = self._recruitment_state(counselor_state)
             readiness = self._readiness_summary_from_stage(student.current_stage, student.risk_level)
             program_summary = StudentProgramSummary(id=(str(program_row.id) if program_row else None), name=(program_row.name if program_row else prospect.program_interest if prospect else "Transcript intake"))
             records.append(
@@ -224,6 +815,7 @@ class Student360Service:
                     email=student.email,
                     phone=student.phone,
                     program=program_summary,
+                    degreeProgram=program_summary.name,
                     population=prospect.population if prospect else self._student_type(student.accepted_credits),
                     studentType=prospect.population if prospect else self._student_type(student.accepted_credits),
                     source=prospect.source if prospect else "transcript_first",
@@ -231,10 +823,11 @@ class Student360Service:
                     campaign=prospect.campaign if prospect else None,
                     termInterest=prospect.term_interest if prospect else None,
                     institutionGoal=institution_goal,
-                    stage=prospect.lifecycle_stage if prospect else self._title_case(student.current_stage or "decision-ready"),
+                    stage=canonical_pipeline_status(prospect.lifecycle_stage if prospect else student.current_stage),
                     risk=self._title_case(student.risk_level or "low"),
                     owner=owner_summary,
                     assignedOwner=owner_summary,
+                    ownerId=owner_summary.id,
                     advisor=owner_summary.name,
                     readiness=readiness,
                     city=self._format_location(student.city, student.state, student.country),
@@ -247,6 +840,13 @@ class Student360Service:
                     lastActivity=self._format_timestamp(student.latest_activity_at or student.updated_at),
                     tags=self._build_tags(program_summary.name, student.risk_level, student.current_stage),
                     nextBestAction=next_best_action,
+                    nextAction=counselor_state.get("nextAction") or next_best_action,
+                    lastContactedAt=counselor_state.get("lastContactedAt"),
+                    nextFollowUpAt=counselor_state.get("nextFollowUpAt"),
+                    contactOutcome=counselor_state.get("contactOutcome"),
+                    territory=recruitment.get("territory"),
+                    sourceSchool=recruitment.get("sourceSchool"),
+                    partnerSchool=recruitment.get("partnerSchool"),
                 )
             )
         return records
@@ -568,19 +1168,41 @@ class Student360Service:
                 )
             )
 
+        interactions = session.execute(
+            select(StudentInteraction)
+            .where(StudentInteraction.tenant_id == tenant_id, StudentInteraction.student_id == student.id)
+            .order_by(StudentInteraction.occurred_at.desc(), StudentInteraction.created_at.desc())
+        ).scalars().all()
+        for interaction in interactions:
+            events.append(
+                self._timeline_event(
+                    event_id=interaction.id,
+                    event_type="interaction",
+                    title=interaction.title,
+                    description=interaction.description or interaction.note,
+                    occurred_at=interaction.occurred_at,
+                    actor=interaction.actor_name,
+                    source=interaction.source,
+                    status=self._title_case(interaction.outcome),
+                    entity_type="student_interaction",
+                    entity_id=interaction.id,
+                )
+            )
+
         notes = session.execute(
             select(StudentNote).where(StudentNote.tenant_id == tenant_id, StudentNote.student_id == student.id).order_by(StudentNote.created_at.desc())
         ).scalars().all()
         for note in notes:
+            is_counselor_note = note.note_type in {"contacted", "follow_up", "request_document", "route_handoff"}
             events.append(
                 self._timeline_event(
                     event_id=note.id,
                     event_type="interaction",
-                    title=f"{self._title_case(note.note_type)} note added",
+                    title="Contact logged" if is_counselor_note else f"{self._title_case(note.note_type)} note added",
                     description=note.body if not note.is_internal else "Internal note added.",
                     occurred_at=note.created_at,
                     actor=self._actor_for_user(actors, note.author_user_id),
-                    source="interaction",
+                    source="counselor_workbench" if is_counselor_note else "interaction",
                     status=note.note_type,
                     entity_type="student_note",
                     entity_id=note.id,
@@ -795,6 +1417,18 @@ class Student360Service:
         recommendation = self._build_recommendation(transcripts, student.risk_level, student.current_stage)
         institution_goal = institution.name if institution else self._latest_institution_name(transcripts)
         owner_summary = self._owner_summary(prospect_owner or advisor)
+        counselor_state = self._load_counselor_state(session, tenant_id, [student.id]).get(student.id, {})
+        recruitment = self._recruitment_state(counselor_state)
+        interactions = [
+            self._serialize_interaction(interaction).model_dump(mode="json")
+            for interaction in session.execute(
+                select(StudentInteraction)
+                .where(StudentInteraction.tenant_id == tenant_id, StudentInteraction.student_id == student.id)
+                .order_by(StudentInteraction.occurred_at.desc(), StudentInteraction.created_at.desc())
+            ).scalars().all()
+        ]
+        handoffs = self._serialize_student_handoffs(session, tenant_id, student.id)
+        post_admit_milestones = self._serialize_post_admit_milestones(session, tenant_id, student.id)
         readiness = self._load_readiness_summary(session, tenant_id, student.id) or self._readiness_summary_from_stage(student.current_stage, student.risk_level)
         program_summary = StudentProgramSummary(id=(str(program.id) if program else None), name=(program.name if program else prospect.program_interest if prospect else "Transcript intake"))
         return Student360Record(
@@ -805,6 +1439,7 @@ class Student360Service:
             email=student.email,
             phone=student.phone,
             program=program_summary,
+            degreeProgram=program_summary.name,
             population=prospect.population if prospect else self._student_type(student.accepted_credits),
             studentType=prospect.population if prospect else self._student_type(student.accepted_credits),
             source=prospect.source if prospect else "transcript_first",
@@ -812,7 +1447,7 @@ class Student360Service:
             campaign=prospect.campaign if prospect else None,
             termInterest=prospect.term_interest if prospect else None,
             institutionGoal=institution_goal,
-            stage=prospect.lifecycle_stage if prospect else self._title_case(student.current_stage or "decision-ready"),
+            stage=canonical_pipeline_status(prospect.lifecycle_stage if prospect else student.current_stage),
             risk=self._title_case(student.risk_level or "low"),
             fitScore=self._estimate_fit_score(student.latest_cumulative_gpa, transcripts),
             depositLikelihood=self._estimate_deposit_likelihood(student.risk_level, student.latest_cumulative_gpa, transcripts),
@@ -822,10 +1457,21 @@ class Student360Service:
             transcriptsCount=len(transcripts),
             owner=owner_summary,
             assignedOwner=owner_summary,
+            ownerId=owner_summary.id,
             advisor=owner_summary.name,
             readiness=readiness,
             tags=self._build_tags(program_summary.name, student.risk_level, student.current_stage),
             nextBestAction=recommendation.nextBestAction,
+            nextAction=counselor_state.get("nextAction") or recommendation.nextBestAction,
+            lastContactedAt=counselor_state.get("lastContactedAt"),
+            nextFollowUpAt=counselor_state.get("nextFollowUpAt"),
+            contactOutcome=counselor_state.get("contactOutcome"),
+            interactions=interactions,
+            handoffs=handoffs,
+            postAdmitMilestones=post_admit_milestones,
+            territory=recruitment.get("territory"),
+            sourceSchool=recruitment.get("sourceSchool"),
+            partnerSchool=recruitment.get("partnerSchool"),
             city=self._format_location(student.city, student.state, student.country),
             lastActivity=self._format_timestamp(student.latest_activity_at or student.updated_at),
             checklist=self._build_checklist(transcripts, student.risk_level),
@@ -1065,6 +1711,227 @@ class Student360Service:
             return StudentOwnerSummary(id=None, name="Unassigned")
         return StudentOwnerSummary(id=str(user.id), name=user.display_name, email=user.email)
 
+    def _serialize_interaction(self, interaction: StudentInteraction) -> StudentInteractionRecord:
+        return StudentInteractionRecord(
+            id=str(interaction.id),
+            studentId=str(interaction.student_id),
+            type=interaction.type,
+            outcome=interaction.outcome,
+            title=interaction.title,
+            note=interaction.note,
+            description=interaction.description,
+            nextAction=interaction.next_action,
+            nextFollowUpAt=self._format_timestamp(interaction.next_follow_up_at) if interaction.next_follow_up_at else None,
+            occurredAt=self._format_timestamp(interaction.occurred_at),
+            actor=interaction.actor_name,
+            source=interaction.source,
+        )
+
+    def _serialize_student_handoffs(self, session: Session, tenant_id: UUID, student_id: UUID) -> list[dict[str, Any]]:
+        tasks = session.execute(
+            select(StudentTask)
+            .where(
+                StudentTask.tenant_id == tenant_id,
+                StudentTask.student_id == student_id,
+                StudentTask.task_type.ilike("%handoff%"),
+            )
+            .order_by(StudentTask.updated_at.desc())
+        ).scalars().all()
+        actors = self._load_actor_map(session, tenant_id)
+        metadata_by_id = self._handoff_metadata(session, tenant_id, student_id)
+        for task in tasks:
+            task._metadata_json = metadata_by_id.get(str(task.id), {})
+        return [self._serialize_handoff_task(task, actors) for task in tasks]
+
+    def _serialize_handoff_task(self, task: StudentTask, actors: dict[UUID, AppUser] | None = None) -> dict[str, Any]:
+        owner = actors.get(task.assigned_to_user_id) if actors and task.assigned_to_user_id else None
+        metadata = {}
+        if hasattr(task, "_metadata_json"):
+            metadata = getattr(task, "_metadata_json") or {}
+        return {
+            "id": str(task.id),
+            "studentId": str(task.student_id),
+            "targetTeam": metadata.get("targetTeam") or metadata.get("office") or self._title_case(task.task_type.replace("handoff", "").strip("_ ")) or "Student Services",
+            "owner": metadata.get("owner") or (owner.display_name if owner else "Unassigned"),
+            "ownerId": metadata.get("ownerId") or (str(task.assigned_to_user_id) if task.assigned_to_user_id else None),
+            "priority": metadata.get("priority") or "Normal",
+            "status": self._title_case(task.status),
+            "dueAt": self._format_timestamp(task.due_at) if task.due_at else None,
+            "blocker": metadata.get("blocker"),
+            "summary": task.label,
+            "createdAt": self._format_timestamp(task.created_at),
+            "createdBy": metadata.get("createdBy"),
+            "updatedAt": self._format_timestamp(task.updated_at),
+        }
+
+    def _handoff_metadata(self, session: Session, tenant_id: UUID, student_id: UUID) -> dict[str, dict[str, Any]]:
+        state = session.execute(
+            select(StudentAgentState)
+            .where(StudentAgentState.tenant_id == tenant_id, StudentAgentState.student_id == student_id)
+            .limit(1)
+        ).scalar_one_or_none()
+        if state is None:
+            return {}
+        return dict((state.state_json or {}).get("handoffMetadata") or {})
+
+    def _merge_handoff_metadata(self, session: Session, tenant_id: UUID, student_id: UUID, handoff_id: str, metadata: dict[str, Any]) -> None:
+        state = session.execute(
+            select(StudentAgentState)
+            .where(StudentAgentState.tenant_id == tenant_id, StudentAgentState.student_id == student_id)
+            .limit(1)
+        ).scalar_one_or_none()
+        if state is None:
+            state = StudentAgentState(tenant_id=tenant_id, student_id=student_id, state_json={})
+            session.add(state)
+            session.flush()
+        state_json = dict(state.state_json or {})
+        handoff_metadata = dict(state_json.get("handoffMetadata") or {})
+        current = dict(handoff_metadata.get(handoff_id) or {})
+        current.update({key: value for key, value in metadata.items() if value is not None})
+        handoff_metadata[handoff_id] = current
+        state_json["handoffMetadata"] = handoff_metadata
+        state.state_json = state_json
+        state.updated_at = datetime.now(timezone.utc)
+
+    def _serialize_post_admit_milestones(self, session: Session, tenant_id: UUID, student_id: UUID) -> list[dict[str, Any]]:
+        existing = session.execute(
+            select(StudentEnrollmentMilestone)
+            .where(StudentEnrollmentMilestone.tenant_id == tenant_id, StudentEnrollmentMilestone.student_id == student_id)
+            .order_by(StudentEnrollmentMilestone.updated_at.desc())
+        ).scalars().all()
+        by_code = {row.milestone_code: row for row in existing}
+        records: list[dict[str, Any]] = []
+        for code, label, owner in self._post_admit_milestone_defs():
+            row = by_code.get(code)
+            metadata = dict(row.metadata_json or {}) if row else {}
+            records.append(
+                {
+                    "id": code,
+                    "label": row.milestone_label if row else label,
+                    "status": self._frontend_milestone_status(row.status if row else "not_started"),
+                    "owner": metadata.get("owner") or owner,
+                    "dueAt": metadata.get("dueAt"),
+                    "blocker": metadata.get("blocker"),
+                    "updatedAt": self._format_timestamp(row.updated_at) if row else None,
+                    "integration": metadata.get("integration") or self._milestone_integration_placeholder(code),
+                }
+            )
+        return records
+
+    def _milestone_record(self, milestone: StudentEnrollmentMilestone) -> dict[str, Any]:
+        metadata = dict(milestone.metadata_json or {})
+        return {
+            "id": milestone.milestone_code,
+            "label": milestone.milestone_label,
+            "status": self._frontend_milestone_status(milestone.status),
+            "owner": metadata.get("owner"),
+            "dueAt": metadata.get("dueAt"),
+            "blocker": metadata.get("blocker"),
+            "updatedAt": self._format_timestamp(milestone.updated_at),
+            "integration": metadata.get("integration") or self._milestone_integration_placeholder(milestone.milestone_code),
+        }
+
+    def _post_admit_milestone_defs(self) -> list[tuple[str, str, str]]:
+        return [
+            ("financial_aid_package", "Financial aid package", "Financial Aid"),
+            ("scholarship_status", "Scholarship status", "Financial Aid"),
+            ("deposit_commitment", "Deposit commitment", "Admissions"),
+            ("housing_application", "Housing application", "Housing"),
+            ("orientation", "Orientation", "Orientation"),
+            ("advising_appointment", "Advising appointment", "Advising"),
+            ("registration_status", "Registration status", "Registrar"),
+            ("bursar_account", "Bursar account", "Bursar"),
+            ("international_docs", "International documents", "International Office"),
+            ("veteran_benefits", "Veteran benefits", "Veteran Services"),
+            ("accessibility_handoff", "Accessibility handoff", "Accessibility Services"),
+        ]
+
+    def _frontend_milestone_status(self, value: str | None) -> str:
+        normalized = (value or "not_started").lower().replace("-", "_").replace(" ", "_")
+        mapping = {
+            "not_started": "Not started",
+            "open": "Not started",
+            "in_progress": "In progress",
+            "blocked": "Blocked",
+            "complete": "Complete",
+            "completed": "Complete",
+            "waived": "Waived",
+        }
+        return mapping.get(normalized, self._title_case(value))
+
+    def _milestone_integration_placeholder(self, code: str) -> dict[str, Any] | None:
+        placeholders = {
+            "registration_status": {"system": "SIS", "status": "not_connected"},
+            "financial_aid_package": {"system": "Financial Aid", "status": "not_connected"},
+            "housing_application": {"system": "Housing", "status": "not_connected"},
+            "orientation": {"system": "Orientation", "status": "not_connected"},
+            "bursar_account": {"system": "Bursar", "status": "not_connected"},
+        }
+        return placeholders.get(code)
+
+    def _recruitment_state(self, state: dict[str, Any]) -> dict[str, Any]:
+        recruitment = dict(state.get("recruitment") or {})
+        return {
+            "territory": recruitment.get("territory") or state.get("territory"),
+            "sourceSchool": recruitment.get("sourceSchool") or state.get("sourceSchool"),
+            "partnerSchool": recruitment.get("partnerSchool") or state.get("partnerSchool"),
+        }
+
+    def _update_student_counselor_state(
+        self,
+        session: Session,
+        *,
+        tenant_id: UUID,
+        student: Student,
+        occurred_at: datetime,
+        updated_at: datetime,
+        state_updates: dict[str, str | None],
+    ) -> None:
+        state = session.execute(
+            select(StudentAgentState)
+            .where(StudentAgentState.tenant_id == tenant_id, StudentAgentState.student_id == student.id)
+            .limit(1)
+        ).scalar_one_or_none()
+        if state is None:
+            state = StudentAgentState(tenant_id=tenant_id, student_id=student.id)
+            session.add(state)
+            session.flush()
+        state_json = dict(state.state_json or {})
+        for key, value in state_updates.items():
+            if value is not None:
+                state_json[key] = value
+        state.state_json = state_json
+        state.updated_at = updated_at
+
+        student.latest_activity_at = occurred_at
+        student.updated_at = updated_at
+
+        projected = session.execute(
+            select(StudentWorkState)
+            .where(StudentWorkState.tenant_id == tenant_id, StudentWorkState.student_id == student.id)
+            .limit(1)
+        ).scalar_one_or_none()
+        if projected is not None:
+            projected.last_activity_at = occurred_at
+            projected.updated_at = updated_at
+
+    def _actor_name_for_user(self, session: Session, actor_user_id: UUID | None) -> str | None:
+        if actor_user_id is None:
+            return None
+        user = session.get(AppUser, actor_user_id)
+        return user.display_name if user else None
+
+    def _load_counselor_state(self, session: Session, tenant_id: UUID, student_ids: list[UUID]) -> dict[UUID, dict[str, Any]]:
+        if not student_ids:
+            return {}
+        rows = session.execute(
+            select(StudentAgentState).where(
+                StudentAgentState.tenant_id == tenant_id,
+                StudentAgentState.student_id.in_(student_ids),
+            )
+        ).scalars().all()
+        return {row.student_id: dict(row.state_json or {}) for row in rows}
+
     def _load_actor_map(self, session: Session, tenant_id: UUID) -> dict[UUID, AppUser]:
         rows = session.execute(select(AppUser).where(AppUser.tenant_id == tenant_id)).scalars().all()
         return {user.id: user for user in rows}
@@ -1085,7 +1952,7 @@ class Student360Service:
         title: str,
         description: str | None,
         occurred_at: datetime | None,
-        actor: StudentTimelineActor | None,
+        actor: StudentTimelineActor | str | None,
         source: str,
         status: str | None,
         entity_type: str,
@@ -1504,6 +2371,60 @@ class Student360Service:
         if not value:
             return "Unknown"
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _parse_client_datetime(self, value: str) -> datetime:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("Datetime values must be valid ISO 8601 strings.") from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _uuid_or_none(self, value: str | UUID | None) -> UUID | None:
+        if isinstance(value, UUID):
+            return value
+        if not value:
+            return None
+        try:
+            return UUID(str(value))
+        except ValueError:
+            return None
+
+    def _write_student_audit(
+        self,
+        session: Session,
+        *,
+        tenant_id: UUID,
+        actor_user_id: UUID,
+        student_id: UUID,
+        action: str,
+        metadata: dict[str, Any],
+        occurred_at: datetime | None = None,
+    ) -> None:
+        session.add(
+            AuditEvent(
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                entity_type="student",
+                entity_id=student_id,
+                category="CounselorWorkbench",
+                action=action,
+                success=True,
+                error_message=None,
+                payload_json={
+                    "tenantId": str(tenant_id),
+                    "studentId": str(student_id),
+                    "student_id": str(student_id),
+                    "actorUserId": str(actor_user_id),
+                    "metadata": metadata,
+                    **metadata,
+                },
+                correlation_id=None,
+                source="counselor_workbench",
+                occurred_at=occurred_at or datetime.now(timezone.utc),
+            )
+        )
 
     def _format_clock(self, value: datetime | None) -> str:
         if not value:

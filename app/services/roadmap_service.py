@@ -358,6 +358,126 @@ class RoadmapService:
             }
             return {"type": report_type, "metrics": metrics, "items": [], "total": 0, "limit": limit, "offset": offset}
 
+    def communication_templates(self, tenant_id: UUID) -> dict[str, Any]:
+        templates = list(self._settings_raw(tenant_id).get("communication_templates") or [])
+        if not templates:
+            templates = self._default_communication_templates()
+        return {"items": templates, "total": len(templates)}
+
+    def counselor_reporting(self, tenant_id: UUID, report_type: str, filters: dict[str, Any]) -> dict[str, Any]:
+        with self.session_factory()() as session:
+            stage_rows = session.execute(
+                select(Student.current_stage, func.count()).where(Student.tenant_id == tenant_id).group_by(Student.current_stage)
+            ).all()
+            handoff_total = int(session.execute(select(func.count()).select_from(StudentTask).where(StudentTask.tenant_id == tenant_id, StudentTask.task_type.ilike("%handoff%"))).scalar_one() or 0)
+            handoff_open = int(session.execute(select(func.count()).select_from(StudentTask).where(StudentTask.tenant_id == tenant_id, StudentTask.task_type.ilike("%handoff%"), StudentTask.status.notin_(["Complete", "complete", "completed"]))).scalar_one() or 0)
+            now = datetime.now(timezone.utc)
+            handoff_overdue = int(session.execute(select(func.count()).select_from(StudentTask).where(StudentTask.tenant_id == tenant_id, StudentTask.task_type.ilike("%handoff%"), StudentTask.due_at < now, StudentTask.status.notin_(["Complete", "complete", "completed"]))).scalar_one() or 0)
+            funnel = {str(stage or "unknown"): int(count) for stage, count in stage_rows}
+            metrics = {
+                "funnel": funnel,
+                "conversionRates": self._conversion_rates(funnel),
+                "averageDaysInStage": {},
+                "averageResponseTimeByCounselor": {},
+                "counselorWorkload": {},
+                "completedApplicationsBySource": {},
+                "yieldByProgram": {},
+                "territorySourceEventPerformance": {},
+                "handoffs": {
+                    "openCount": handoff_open,
+                    "overdueCount": handoff_overdue,
+                    "completionRate": round((handoff_total - handoff_open) / handoff_total, 4) if handoff_total else 0,
+                    "averageAge": None,
+                },
+            }
+            return {"type": report_type, "filters": filters, "metrics": metrics, "items": [], "total": 0}
+
+    def recruitment_events(self, tenant_id: UUID) -> dict[str, Any]:
+        events = list(self._settings_raw(tenant_id).get("recruitment_events") or [])
+        return {"items": events, "total": len(events)}
+
+    def add_recruitment_attendee(self, tenant_id: UUID, actor_user_id: UUID, event_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        with self.session_factory()() as session:
+            settings = self._ensure_settings(session, tenant_id)
+            data = dict(settings.settings_json or {})
+            events = list(data.get("recruitment_events") or [])
+            event = next((item for item in events if str(item.get("id")) == event_id), None)
+            if event is None:
+                event = {"id": event_id, "name": payload.get("eventName") or event_id, "attendees": []}
+                events.append(event)
+            attendees = list(event.get("attendees") or [])
+            attendee = dict(payload)
+            attendee.setdefault("id", f"attendee_{int(datetime.now(timezone.utc).timestamp() * 1000)}")
+            attendee.setdefault("eventId", event_id)
+            attendees.append(attendee)
+            event["attendees"] = attendees
+            data["recruitment_events"] = events
+            settings.settings_json = data
+
+            student_id = payload.get("studentId")
+            if student_id:
+                student = self._resolve_student(session, tenant_id, student_id)
+                from app.services.student_360_service import Student360Service
+
+                Student360Service(session_factory=self.session_factory)._update_student_counselor_state(
+                    session,
+                    tenant_id=tenant_id,
+                    student=student,
+                    occurred_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                    state_updates={
+                        "lastActivity": "Just now",
+                        "territory": payload.get("territory"),
+                        "sourceSchool": payload.get("sourceSchool"),
+                        "partnerSchool": payload.get("partnerSchool"),
+                    },
+                )
+            self._audit(session, tenant_id, actor_user_id, "recruitment_event", None, "recruitment_attendee_added", {"eventId": event_id, **payload})
+            session.commit()
+            return {"attendee": attendee, "event": event}
+
+    def list_handoffs(self, tenant_id: UUID, *, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        from app.services.student_360_service import Student360Service
+
+        return Student360Service(session_factory=self.session_factory).list_handoffs(tenant_id, limit=limit, offset=offset)
+
+    def update_handoff_status(self, db: Session, tenant_id: UUID, actor_user_id: UUID, handoff_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from app.services.student_360_service import Student360Service
+
+        return Student360Service(session_factory=self.session_factory).update_handoff_status(db, tenant_id, actor_user_id, handoff_id, payload)
+
+    def _conversion_rates(self, funnel: dict[str, int]) -> dict[str, float]:
+        stages = ["Inquiry", "Prospect", "Applicant", "Incomplete", "Complete", "Admitted", "Deposited/Committed", "Registered"]
+        rates: dict[str, float] = {}
+        for previous, current in zip(stages, stages[1:]):
+            prev_count = funnel.get(previous, 0)
+            rates[f"{previous}_to_{current}"] = round(funnel.get(current, 0) / prev_count, 4) if prev_count else 0
+        return rates
+
+    def _default_communication_templates(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "tmpl_missing_transcript",
+                "key": "missing_transcript",
+                "label": "Missing transcript",
+                "pipelineStatus": "Incomplete",
+                "channel": "email",
+                "subject": "Missing transcript",
+                "body": "Please send your updated transcript so we can continue your application review.",
+                "active": True,
+            },
+            {
+                "id": "tmpl_follow_up",
+                "key": "follow_up",
+                "label": "Follow-up",
+                "pipelineStatus": "Prospect",
+                "channel": "text",
+                "subject": "",
+                "body": "Checking in on your next step.",
+                "active": True,
+            },
+        ]
+
     def implementation_readiness(self, tenant_id: UUID) -> dict[str, Any]:
         checklist = self._settings_raw(tenant_id).get("implementation_checklist") or self._default_implementation_checklist()
         completed = sum(1 for item in checklist if item.get("status") == "complete")
@@ -618,4 +738,3 @@ class RoadmapService:
         if not value:
             return None
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-

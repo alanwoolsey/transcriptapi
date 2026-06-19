@@ -89,6 +89,7 @@ class Student360ListRecord(BaseModel):
     email: str | None = None
     phone: str | None = None
     program: str | StudentProgramSummary
+    degreeProgram: str | None = None
     population: str | None = None
     studentType: str | None = None
     source: str | None = None
@@ -100,6 +101,7 @@ class Student360ListRecord(BaseModel):
     risk: str
     owner: StudentOwnerSummary | None = None
     assignedOwner: StudentOwnerSummary | None = None
+    ownerId: str | None = None
     advisor: str
     readiness: StudentReadinessSummary | None = None
     city: str | None = None
@@ -112,6 +114,16 @@ class Student360ListRecord(BaseModel):
     lastActivity: str | None = None
     tags: list[str] = Field(default_factory=list)
     nextBestAction: str
+    nextAction: str | None = None
+    lastContactedAt: str | None = None
+    nextFollowUpAt: str | None = None
+    contactOutcome: str | None = None
+    interactions: list[dict[str, Any]] | None = None
+    handoffs: list[dict[str, Any]] | None = None
+    postAdmitMilestones: list[dict[str, Any]] | None = None
+    territory: str | None = None
+    sourceSchool: str | None = None
+    partnerSchool: str | None = None
     checklist: list[StudentChecklistItem] | None = None
     transcripts: list[StudentTranscriptRecord] | None = None
     termGpa: list[StudentTermGpa] | None = None
@@ -149,13 +161,62 @@ class StudentTimelineEntity(BaseModel):
     id: str | None = None
 
 
+class StudentInteractionRecord(BaseModel):
+    id: str
+    studentId: str | None = None
+    type: str
+    outcome: str | None = None
+    title: str
+    note: str | None = None
+    description: str | None = None
+    nextAction: str | None = None
+    nextFollowUpAt: str | None = None
+    occurredAt: str
+    actor: str | None = None
+    source: str
+
+
+class StudentInteractionCreateRequest(BaseModel):
+    type: str
+    outcome: str | None = None
+    title: str | None = None
+    note: str | None = None
+    description: str | None = None
+    nextAction: str | None = None
+    nextFollowUpAt: str | None = None
+    occurredAt: str | None = None
+    actor: str | None = None
+    source: str = "student_360"
+
+
+class StudentInteractionUpdateRequest(BaseModel):
+    type: str | None = None
+    outcome: str | None = None
+    title: str | None = None
+    note: str | None = None
+    description: str | None = None
+    nextAction: str | None = None
+    nextFollowUpAt: str | None = None
+    occurredAt: str | None = None
+    actor: str | None = None
+    source: str | None = None
+
+
+class StudentInteractionCreateResponse(BaseModel):
+    interaction: StudentInteractionRecord
+
+
+class StudentInteractionsListResponse(BaseModel):
+    items: list[StudentInteractionRecord] = Field(default_factory=list)
+
+
 class StudentTimelineEvent(BaseModel):
     id: str
     type: str
     title: str
     description: str | None = None
     occurredAt: str
-    actor: StudentTimelineActor | None = None
+    actor: StudentTimelineActor | str | None = None
     source: str
     status: str | None = None
     entity: StudentTimelineEntity | None = None
@@ -164,3 +225,35 @@ class StudentTimelineEvent(BaseModel):
 
 class StudentTimelineResponse(BaseModel):
     events: list[StudentTimelineEvent] = Field(default_factory=list)
+
+
+class StudentProgramUpdateRequest(BaseModel):
+    program: str | None = None
+    degreeProgram: str | None = None
+
+
+class StudentProgramUpdateResponse(BaseModel):
+    id: str
+    program: str
+    degreeProgram: str
+    stage: str
+
+
+class StudentNextActionRequest(BaseModel):
+    actionType: str
+    note: str | None = None
+    nextAction: str | None = None
+    contactOutcome: str | None = None
+    ownerId: str | None = None
+    lastContactedAt: str | None = None
+    nextFollowUpAt: str | None = None
+    lastActivity: str | None = None
+
+
+class StudentNextActionResponse(BaseModel):
+    id: str
+    nextAction: str | None = None
+    nextFollowUpAt: str | None = None
+    lastContactedAt: str | None = None
+    contactOutcome: str | None = None
+    lastActivity: str | None = None

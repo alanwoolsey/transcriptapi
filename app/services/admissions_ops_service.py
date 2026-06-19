@@ -44,6 +44,8 @@ from app.models.ops_models import (
     StudentReadinessResponse,
     WorkBlockingItem,
     WorkChecklistSummary,
+    WorkCounselorTodayBucket,
+    WorkCounselorTodayResponse,
     WorkItemOwner,
     WorkItemReason,
     WorkItemResponse,
@@ -62,6 +64,7 @@ from app.models.ops_models import (
     WorkTodayResponse,
 )
 from app.services.agent_run_service import AgentRunService
+from app.services.pipeline_status import canonical_pipeline_status
 from app.services.prospect_service import ProspectService
 from app.services.work_state_projector import WorkStateProjector
 
@@ -307,6 +310,44 @@ class AdmissionsOpsService:
             groups = self._group_today_work_items(items)
             session.commit()
             return WorkTodayBoardResponse(groups=groups, total=len(rows) + len(prospect_items))
+
+    def get_counselor_today_work(self, tenant_id: UUID, *, limit: int = 100) -> WorkCounselorTodayResponse:
+        today = self.get_today_work(tenant_id, limit=limit)
+        bucket_defs = [
+            ("overdue_follow_up", "overdue follow-up", "Follow-up date has passed."),
+            ("inquiry", "Inquiry", "Inquiry needs counselor follow-up."),
+            ("prospect", "Prospect", "Inquiry or prospect needs counselor follow-up."),
+            ("applicant", "Applicant", "Application started or submitted."),
+            ("incomplete", "Incomplete", "Missing transcript, essay, fee, etc."),
+            ("complete", "Complete", "Ready for review or decision action."),
+            ("admitted", "Admitted", "Admitted student needs yield support."),
+            ("deposited_committed", "Deposited/Committed", "Committed student needs enrollment support."),
+            ("registered", "Registered", "Registered student work remains open."),
+            ("handoff_queue", "handoff queue", "Cross-office handoffs need attention."),
+            ("post_admit_blockers", "post-admit blockers", "Post-admit milestone blockers are open."),
+            ("recruitment_follow_up", "recruitment follow-up", "Recruitment event or territory follow-up is due."),
+        ]
+        items_by_key: dict[str, list[WorkTodayItemResponse]] = {key: [] for key, *_ in bucket_defs}
+        for item in today.items:
+            status = canonical_pipeline_status(item.pipelineStatus or item.stage)
+            key = status.lower().replace("/", "_").replace(" ", "_")
+            if item.nextFollowUpAt and self._parse_iso_datetime(item.nextFollowUpAt) and self._parse_iso_datetime(item.nextFollowUpAt) < datetime.now(timezone.utc):
+                key = "overdue_follow_up"
+            elif item.queueGroup and "handoff" in item.queueGroup:
+                key = "handoff_queue"
+            elif item.queueGroup and "post_admit" in item.queueGroup:
+                key = "post_admit_blockers"
+            elif item.queueGroup and "recruitment" in item.queueGroup:
+                key = "recruitment_follow_up"
+            if key not in items_by_key:
+                key = "incomplete"
+            items_by_key[key].append(item)
+        return WorkCounselorTodayResponse(
+            buckets=[
+                WorkCounselorTodayBucket(key=key, label=label, meaning=meaning, items=items_by_key[key])
+                for key, label, meaning in bucket_defs
+            ]
+        )
 
     def orchestrate_today_work(
         self,
@@ -1219,12 +1260,14 @@ class AdmissionsOpsService:
         if latest_confidence is None:
             latest_confidence = self._latest_transcript_confidence(session, tenant_id, student.id)
 
+        pipeline_status = canonical_pipeline_status(context.student.current_stage or context.checklist.status)
         return WorkItemResponse(
             id=f"work_{student.id.hex[:12]}",
             studentId=self._student_identifier(student),
             studentName=self._student_name(student),
             population=context.checklist.population,
-            stage=context.checklist.status,
+            stage=pipeline_status,
+            pipelineStatus=pipeline_status,
             completionPercent=context.checklist.completion_percent,
             priority=context.priority.priority_band,
             priorityScore=context.priority.priority_score,
@@ -1257,12 +1300,14 @@ class AdmissionsOpsService:
         )
 
     def _build_projected_work_item(self, row: StudentWorkState) -> WorkItemResponse:
+        pipeline_status = canonical_pipeline_status(row.stage)
         return WorkItemResponse(
             id=f"work_{row.student_id.hex[:12]}",
             studentId=row.student_identifier,
             studentName=row.student_name,
             population=row.population,
-            stage=row.stage,
+            stage=pipeline_status,
+            pipelineStatus=pipeline_status,
             completionPercent=row.completion_percent,
             priority=row.priority,
             priorityScore=row.priority_score,
@@ -1345,12 +1390,15 @@ class AdmissionsOpsService:
             decision_run=decision_run,
         )
         queue_group = self._today_queue_group(row, recommended_agent)
+        counselor_state = dict(agent_state.state_json or {}) if agent_state else {}
+        pipeline_status = canonical_pipeline_status(row.stage)
         return WorkTodayItemResponse(
             id=f"work_{row.student_id.hex[:12]}",
             studentId=row.student_identifier,
             studentName=row.student_name,
             population=row.population,
-            stage=row.stage,
+            stage=pipeline_status,
+            pipelineStatus=pipeline_status,
             completionPercent=row.completion_percent,
             section=row.section,
             priority=row.priority,
@@ -1364,11 +1412,17 @@ class AdmissionsOpsService:
             program=row.program,
             institutionGoal=row.institution_goal,
             risk=row.risk,
-            lastActivity=self._relative_time(row.last_activity_at),
+            lastActivity=counselor_state.get("lastActivity") or self._relative_time(row.last_activity_at),
+            lastActivityAt=self._isoformat(row.last_activity_at),
+            lastContactedAt=counselor_state.get("lastContactedAt"),
+            nextFollowUpAt=counselor_state.get("nextFollowUpAt"),
+            nextAction=counselor_state.get("nextAction") or row.suggested_action_label,
+            contactOutcome=counselor_state.get("contactOutcome"),
             currentOwnerAgent=(agent_state.current_owner_agent if agent_state else None),
             currentStage=(agent_state.current_stage if agent_state else None),
             recommendedAgent=recommended_agent,
             queueGroup=queue_group,
+            routeHint={"nextAgent": recommended_agent, "reason": _reason, "actionLabel": row.suggested_action_label},
             documentAgent=self._build_today_agent_summary(document_run),
             trustAgent=self._build_today_agent_summary(trust_run),
             decisionAgent=self._build_today_agent_summary(decision_run),
@@ -2101,6 +2155,17 @@ class AdmissionsOpsService:
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _parse_iso_datetime(self, value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def _to_float(self, value: Decimal | float | int | None, fallback: float | None = 0.0) -> float | None:
         if value is None:
