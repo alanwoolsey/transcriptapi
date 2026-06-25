@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from uuid import UUID
+import logging
+from uuid import UUID, uuid4
 
 from sqlalchemy import Select, func, or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -75,6 +77,9 @@ class AdmissionsOpsNotFoundError(Exception):
 
 class AdmissionsOpsValidationError(Exception):
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -369,87 +374,92 @@ class AdmissionsOpsService:
         ]
         board = WorkTodayBoardResponse(groups=self._group_today_work_items(items), total=len(rows))
 
-        run = self.agent_run_service.create_run(
-            db,
-            tenant_id=tenant_id,
-            agent_name="orchestrator_agent",
-            agent_type="orchestrator",
-            trigger_event="manual_today_work_orchestration",
-            status="running",
-            actor_user_id=actor_user_id,
-            correlation_id=f"today-work:{actor_user_id}",
-            input_json={
-                "limit": limit,
-                "total_candidates": len(rows),
-            },
-        )
-
-        actions: list[AgentRunActionItemResponse] = []
-        for group in board.groups:
-            action = self.agent_run_service.record_action(
+        try:
+            run = self.agent_run_service.create_run(
                 db,
                 tenant_id=tenant_id,
-                run_id=run.id,
-                action_type="prioritize_today_work_group",
-                tool_name="prioritize_today_work_group",
-                status="completed",
+                agent_name="orchestrator_agent",
+                agent_type="orchestrator",
+                trigger_event="manual_today_work_orchestration",
+                status="running",
+                actor_user_id=actor_user_id,
+                correlation_id=f"today-work:{actor_user_id}",
                 input_json={
-                    "groupKey": group.key,
                     "limit": limit,
+                    "total_candidates": len(rows),
                 },
+            )
+
+            actions: list[AgentRunActionItemResponse] = []
+            for group in board.groups:
+                action = self.agent_run_service.record_action(
+                    db,
+                    tenant_id=tenant_id,
+                    run_id=run.id,
+                    action_type="prioritize_today_work_group",
+                    tool_name="prioritize_today_work_group",
+                    status="completed",
+                    input_json={
+                        "groupKey": group.key,
+                        "limit": limit,
+                    },
+                    output_json={
+                        "status": "completed",
+                        "code": "today_work_group_prioritized",
+                        "message": f"{group.label} queue grouped.",
+                        "error": None,
+                        "metrics": {
+                            "groupTotal": group.total,
+                        },
+                        "artifacts": {
+                            "groupKey": group.key,
+                            "studentIds": [item.studentId for item in group.items],
+                            "recommendedAgents": sorted({item.recommendedAgent for item in group.items if item.recommendedAgent}),
+                            "routeHint": self._model_dump(group.routeHint) if group.routeHint else {},
+                        },
+                    },
+                )
+                actions.append(self._serialize_agent_action(action))
+
+            self.agent_run_service.complete_run(
+                db,
+                run=run,
+                status="completed",
                 output_json={
                     "status": "completed",
-                    "code": "today_work_group_prioritized",
-                    "message": f"{group.label} queue grouped.",
+                    "code": "today_work_prioritized",
+                    "message": "Today's work prioritized and grouped.",
                     "error": None,
                     "metrics": {
-                        "groupTotal": group.total,
+                        "totalStudents": len(items),
+                        "groupCount": len(board.groups),
                     },
                     "artifacts": {
-                        "groupKey": group.key,
-                        "studentIds": [item.studentId for item in group.items],
-                        "recommendedAgents": sorted({item.recommendedAgent for item in group.items if item.recommendedAgent}),
-                        "routeHint": self._model_dump(group.routeHint) if group.routeHint else {},
+                        "groupKeys": [group.key for group in board.groups],
+                        "boardSnapshot": self._model_dump(board),
                     },
                 },
             )
-            actions.append(self._serialize_agent_action(action))
 
-        self.agent_run_service.complete_run(
-            db,
-            run=run,
-            status="completed",
-            output_json={
-                "status": "completed",
-                "code": "today_work_prioritized",
-                "message": "Today's work prioritized and grouped.",
-                "error": None,
-                "metrics": {
-                    "totalStudents": len(items),
-                    "groupCount": len(board.groups),
-                },
-                "artifacts": {
-                    "groupKeys": [group.key for group in board.groups],
-                    "boardSnapshot": self._model_dump(board),
-                },
-            },
-        )
+            for row in rows[:limit]:
+                self.agent_run_service.upsert_student_state(
+                    db,
+                    tenant_id=tenant_id,
+                    student_id=row.student_id,
+                    last_orchestrator_run_id=run.id,
+                )
 
-        for row in rows[:limit]:
-            self.agent_run_service.upsert_student_state(
-                db,
-                tenant_id=tenant_id,
-                student_id=row.student_id,
-                last_orchestrator_run_id=run.id,
+            db.commit()
+            return WorkTodayOrchestrationResponse(
+                agentRunId=str(run.id),
+                board=board,
+                run=self._serialize_agent_run(run),
+                actions=actions,
             )
-
-        db.commit()
-        return WorkTodayOrchestrationResponse(
-            agentRunId=str(run.id),
-            board=board,
-            run=self._serialize_agent_run(run),
-            actions=actions,
-        )
+        except SQLAlchemyError:
+            db.rollback()
+            logger.exception("Failed to persist today work orchestration; returning non-persisted response.")
+            return self._non_persisted_today_orchestration_response(board, actor_user_id=actor_user_id)
 
     def get_latest_today_work_orchestration(
         self,
@@ -1706,6 +1716,50 @@ class AdmissionsOpsService:
             result=self._build_agent_run_result(action.output_json),
             input=action.input_json if isinstance(action.input_json, dict) else {},
             output=action.output_json if isinstance(action.output_json, dict) else {},
+        )
+
+    def _non_persisted_today_orchestration_response(
+        self,
+        board: WorkTodayBoardResponse,
+        *,
+        actor_user_id: UUID,
+    ) -> WorkTodayOrchestrationResponse:
+        from app.models.operations_models import AgentRunResultResponse, AgentRunStatusResponse
+
+        run_id = f"non-persisted-{uuid4()}"
+        completed_at = self._isoformat(datetime.now(timezone.utc))
+        result = AgentRunResultResponse(
+            status="completed",
+            code="today_work_prioritized",
+            message="Today's work prioritized and grouped.",
+            error="The orchestration snapshot could not be persisted.",
+            metrics={
+                "totalStudents": sum(group.total for group in board.groups),
+                "groupCount": len(board.groups),
+            },
+            artifacts={
+                "groupKeys": [group.key for group in board.groups],
+                "boardSnapshot": self._model_dump(board),
+                "persisted": False,
+            },
+        )
+        return WorkTodayOrchestrationResponse(
+            agentRunId=run_id,
+            board=board,
+            run=AgentRunStatusResponse(
+                runId=run_id,
+                agentName="orchestrator_agent",
+                agentType="orchestrator",
+                status="completed",
+                triggerEvent="manual_today_work_orchestration",
+                actorUserId=str(actor_user_id),
+                correlationId=f"today-work:{actor_user_id}",
+                error="The orchestration snapshot could not be persisted.",
+                startedAt=completed_at,
+                completedAt=completed_at,
+                result=result,
+            ),
+            actions=[],
         )
 
     def _build_agent_run_result(self, payload: dict | None):

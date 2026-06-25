@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from uuid import uuid4
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.models.ops_models import WorkItemOwner, WorkItemReason, WorkTodayItemResponse
 from app.services.admissions_ops_service import AdmissionsOpsService
 
@@ -163,6 +165,54 @@ def test_board_snapshot_from_run_uses_persisted_snapshot_when_present():
     assert board.groups[0].key == "decision_review"
     assert board.groups[0].routeHint is not None
     assert board.groups[0].routeHint.nextAgent == "decision_agent"
+
+
+def test_orchestrate_today_work_returns_non_persisted_response_when_persistence_fails():
+    service = AdmissionsOpsService(session_factory=lambda: None)
+    tenant_id = uuid4()
+    actor_user_id = uuid4()
+    student_id = uuid4()
+
+    class FakeDb:
+        def __init__(self) -> None:
+            self.rollback_count = 0
+
+        def rollback(self) -> None:
+            self.rollback_count += 1
+
+    class FailingAgentRunService:
+        def create_run(self, *args, **kwargs):
+            raise SQLAlchemyError("agent runtime table unavailable")
+
+    db = FakeDb()
+    service.work_state_projector.ensure_tenant_projection = lambda tenant_id: None
+    service.agent_run_service = FailingAgentRunService()
+    service._load_today_work_context = lambda db, tenant_id: (
+        [SimpleNamespace(student_id=student_id)],
+        {},
+        {},
+    )
+    service._build_today_work_item = lambda row, agent_state, run_by_id: WorkTodayItemResponse(
+        id="work-1",
+        studentId="student-1",
+        studentName="A",
+        section="ready",
+        priority="urgent",
+        owner=WorkItemOwner(id=None, name="Owner"),
+        reasonToAct=WorkItemReason(code="ready_for_decision", label="Ready for decision"),
+        suggestedAction=WorkItemReason(code="review_recommendation", label="Review recommendation"),
+        recommendedAgent="decision_agent",
+        queueGroup="decision_waiting",
+    )
+
+    response = service.orchestrate_today_work(db, tenant_id, actor_user_id, limit=100)
+
+    assert response.agentRunId.startswith("non-persisted-")
+    assert response.run.status == "completed"
+    assert response.run.result is not None
+    assert response.run.result.artifacts["persisted"] is False
+    assert response.board.groups[0].key == "decision_waiting"
+    assert db.rollback_count == 1
 
 
 def test_projected_work_items_query_pushes_filters_into_sql():
