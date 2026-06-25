@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import re
 import secrets
 from uuid import UUID
@@ -2257,13 +2257,20 @@ class OperationsService:
         attrs = {item["Name"]: item["Value"] for item in response.get("UserAttributes", [])}
         return attrs.get("sub")
 
-    def _days_stalled(self, value: str | None) -> int:
+    def _days_stalled(self, value: str | datetime | date | None) -> int:
         if not value:
             return 0
-        try:
-            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return 0
+        if isinstance(value, datetime):
+            dt = value
+        elif isinstance(value, date):
+            dt = datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+        else:
+            try:
+                dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                return 0
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         return max(0, (datetime.now(timezone.utc) - dt).days)
 
     def _iso(self, value: datetime | None) -> str | None:

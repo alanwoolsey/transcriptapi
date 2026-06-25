@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -129,3 +130,16 @@ def test_reject_document_match_clears_student_and_records_trust_action():
     ]
     assert service.trust_agent.calls[0]["code"] == "document_match_rejected"
     assert service.trust_agent.calls[0]["payload"].student_id == str(previous_student_id)
+
+
+def test_days_stalled_accepts_datetime_date_and_timestamp_strings():
+    service = OperationsService(session_factory=lambda: None)
+    stale = datetime.now(timezone.utc) - timedelta(days=8)
+    naive_stale = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=8)
+    today = date.today()
+
+    assert service._days_stalled(stale) >= 7
+    assert service._days_stalled(naive_stale) >= 7
+    assert service._days_stalled(stale.isoformat().replace("+00:00", "Z")) >= 7
+    assert service._days_stalled(today) == 0
+    assert service._days_stalled("not-a-date") == 0

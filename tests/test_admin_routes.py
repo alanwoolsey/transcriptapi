@@ -178,6 +178,25 @@ def test_get_yield_queue_accepts_q_and_returns_frontend_shape(monkeypatch):
     assert item["nextStep"] == "Call after housing page visit"
 
 
+def test_get_yield_queue_accepts_no_recent_activity_view(monkeypatch):
+    from app.api import operations_routes
+
+    captured = {}
+
+    def fake_list_yield(tenant_id, **kwargs):
+        captured.update(kwargs)
+        return {"items": []}
+
+    monkeypatch.setattr(operations_routes.operations_service, "list_yield", fake_list_yield)
+
+    client = TestClient(_build_test_app())
+    response = client.get("/api/v1/yield?view=no_recent_activity")
+
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+    assert captured["view"] == "no_recent_activity"
+
+
 def test_get_melt_queue_accepts_q_and_returns_frontend_shape(monkeypatch):
     from app.api import operations_routes
 
