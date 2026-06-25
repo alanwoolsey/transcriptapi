@@ -362,17 +362,25 @@ class AdmissionsOpsService:
         *,
         limit: int = 50,
     ) -> WorkTodayOrchestrationResponse:
-        self.work_state_projector.ensure_tenant_projection(tenant_id)
-        rows, agent_state_by_student, run_by_id = self._load_today_work_context(db, tenant_id)
-        items = [
-            self._build_today_work_item(
-                row,
-                agent_state_by_student.get(row.student_id),
-                run_by_id,
+        try:
+            self.work_state_projector.ensure_tenant_projection(tenant_id)
+            rows, agent_state_by_student, run_by_id = self._load_today_work_context(db, tenant_id)
+            items = [
+                self._build_today_work_item(
+                    row,
+                    agent_state_by_student.get(row.student_id),
+                    run_by_id,
+                )
+                for row in rows[:limit]
+            ]
+            board = WorkTodayBoardResponse(groups=self._group_today_work_items(items), total=len(rows))
+        except Exception:
+            self._rollback_quietly(db)
+            logger.exception("Failed to build today work orchestration board; returning empty non-persisted response.")
+            return self._non_persisted_today_orchestration_response(
+                WorkTodayBoardResponse(groups=[], total=0),
+                actor_user_id=actor_user_id,
             )
-            for row in rows[:limit]
-        ]
-        board = WorkTodayBoardResponse(groups=self._group_today_work_items(items), total=len(rows))
 
         try:
             run = self.agent_run_service.create_run(
@@ -457,8 +465,12 @@ class AdmissionsOpsService:
                 actions=actions,
             )
         except SQLAlchemyError:
-            db.rollback()
+            self._rollback_quietly(db)
             logger.exception("Failed to persist today work orchestration; returning non-persisted response.")
+            return self._non_persisted_today_orchestration_response(board, actor_user_id=actor_user_id)
+        except Exception:
+            self._rollback_quietly(db)
+            logger.exception("Unexpected today work orchestration failure; returning non-persisted response.")
             return self._non_persisted_today_orchestration_response(board, actor_user_id=actor_user_id)
 
     def get_latest_today_work_orchestration(
@@ -1761,6 +1773,12 @@ class AdmissionsOpsService:
             ),
             actions=[],
         )
+
+    def _rollback_quietly(self, db: Session) -> None:
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("Failed to roll back database session.")
 
     def _build_agent_run_result(self, payload: dict | None):
         from app.models.operations_models import AgentRunResultResponse
