@@ -312,6 +312,52 @@ def test_get_today_work_board_returns_grouped_payload(monkeypatch):
     assert payload["groups"][0]["routeHint"]["nextAgent"] == "decision_agent"
 
 
+def test_get_counselor_today_work_board_alias_returns_grouped_payload(monkeypatch):
+    from app.api import work_routes
+
+    monkeypatch.setattr(
+        work_routes.admissions_ops_service,
+        "get_today_work_board",
+        lambda tenant_id, limit=50: {
+            "groups": [
+                {
+                    "key": "decision_review",
+                    "label": "Decision Review",
+                    "total": 1,
+                    "routeHint": {
+                        "nextAgent": "decision_agent",
+                        "reason": "These students are ready for recommendation or decision review.",
+                        "actionLabel": "Route to decision review",
+                    },
+                    "items": [
+                        {
+                            "id": "work_123",
+                            "studentId": "student-1",
+                            "studentName": "Mira Holloway",
+                            "section": "ready",
+                            "priority": "urgent",
+                            "priorityScore": 88,
+                            "owner": {"id": "usr_42", "name": "Elian Brooks"},
+                            "reasonToAct": {"code": "ready_for_decision", "label": "Ready for decision"},
+                            "suggestedAction": {"code": "review_recommendation", "label": "Review recommendation"},
+                            "recommendedAgent": "decision_agent",
+                            "queueGroup": "decision_review",
+                            "updatedAt": "2026-05-05T18:13:00Z",
+                        }
+                    ],
+                }
+            ],
+            "total": 1,
+        },
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.get("/api/v1/work/counselor/today/board?limit=10")
+
+    assert response.status_code == 200
+    assert response.json()["groups"][0]["routeHint"]["nextAgent"] == "decision_agent"
+
+
 def test_get_counselor_today_work_returns_buckets(monkeypatch):
     from app.api import work_routes
 
@@ -482,6 +528,48 @@ def test_orchestrate_today_work_returns_run_and_grouped_payload(monkeypatch):
     assert payload["actions"][0]["result"]["artifacts"]["routeHint"]["nextAgent"] == "decision_agent"
 
 
+def test_orchestrate_counselor_today_work_alias_returns_run(monkeypatch):
+    from app.api import work_routes
+
+    monkeypatch.setattr(
+        work_routes.admissions_ops_service,
+        "orchestrate_today_work",
+        lambda **kwargs: {
+            "agentRunId": "run-orch-1",
+            "board": {"groups": [], "total": 0},
+            "run": {
+                "runId": "run-orch-1",
+                "agentName": "orchestrator_agent",
+                "agentType": "orchestrator",
+                "status": "completed",
+                "triggerEvent": "manual_today_work_orchestration",
+                "studentId": None,
+                "transcriptId": None,
+                "actorUserId": "user-1",
+                "correlationId": "today-work:user-1",
+                "error": None,
+                "startedAt": "2026-05-05T18:13:00Z",
+                "completedAt": "2026-05-05T18:13:00Z",
+                "result": {
+                    "status": "completed",
+                    "code": "today_work_prioritized",
+                    "message": "Today's work prioritized and grouped.",
+                    "error": None,
+                    "metrics": {"totalStudents": 0, "groupCount": 0},
+                    "artifacts": {"groupKeys": []},
+                },
+            },
+            "actions": [],
+        },
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.post("/api/v1/work/counselor/today/orchestrate?limit=10")
+
+    assert response.status_code == 200
+    assert response.json()["agentRunId"] == "run-orch-1"
+
+
 def test_get_latest_today_work_orchestration_returns_snapshot(monkeypatch):
     from app.api import work_routes
 
@@ -555,6 +643,48 @@ def test_get_latest_today_work_orchestration_returns_snapshot(monkeypatch):
     assert payload["agentRunId"] == "run-orch-1"
     assert payload["board"]["groups"][0]["key"] == "decision_review"
     assert payload["board"]["groups"][0]["routeHint"]["nextAgent"] == "decision_agent"
+
+
+def test_get_latest_counselor_today_work_orchestration_alias_returns_snapshot(monkeypatch):
+    from app.api import work_routes
+
+    monkeypatch.setattr(
+        work_routes.admissions_ops_service,
+        "get_latest_today_work_orchestration",
+        lambda tenant_id, student_id=None: {
+            "agentRunId": "run-orch-1",
+            "board": {"groups": [], "total": 0},
+            "run": {
+                "runId": "run-orch-1",
+                "agentName": "orchestrator_agent",
+                "agentType": "orchestrator",
+                "status": "completed",
+                "triggerEvent": "manual_today_work_orchestration",
+                "studentId": None,
+                "transcriptId": None,
+                "actorUserId": "user-1",
+                "correlationId": "today-work:user-1",
+                "error": None,
+                "startedAt": "2026-05-05T18:13:00Z",
+                "completedAt": "2026-05-05T18:13:00Z",
+                "result": {
+                    "status": "completed",
+                    "code": "today_work_prioritized",
+                    "message": "Today's work prioritized and grouped.",
+                    "error": None,
+                    "metrics": {"totalStudents": 0, "groupCount": 0},
+                    "artifacts": {"groupKeys": []},
+                },
+            },
+            "actions": [],
+        },
+    )
+
+    client = TestClient(_build_test_app())
+    response = client.get("/api/v1/work/counselor/today/orchestrations/latest?studentId=student-1")
+
+    assert response.status_code == 200
+    assert response.json()["agentRunId"] == "run-orch-1"
 
 
 def test_route_today_work_returns_payload(monkeypatch):

@@ -94,6 +94,7 @@ def get_today_work(
 
 
 @router.get("/today/board", response_model=WorkTodayBoardResponse)
+@router.get("/counselor/today/board", response_model=WorkTodayBoardResponse)
 def get_today_work_board(
     limit: int = Query(default=50, ge=1, le=100),
     auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
@@ -110,6 +111,7 @@ def get_counselor_today_work(
 
 
 @router.post("/today/orchestrate", response_model=WorkTodayOrchestrationResponse)
+@router.post("/counselor/today/orchestrate", response_model=WorkTodayOrchestrationResponse)
 def orchestrate_today_work(
     limit: int = Query(default=50, ge=1, le=100),
     auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
@@ -124,6 +126,7 @@ def orchestrate_today_work(
 
 
 @router.get("/today/orchestrations/latest", response_model=WorkTodayOrchestrationResponse)
+@router.get("/counselor/today/orchestrations/latest", response_model=WorkTodayOrchestrationResponse)
 def get_latest_today_work_orchestration(
     studentId: str | None = Query(default=None),
     auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
