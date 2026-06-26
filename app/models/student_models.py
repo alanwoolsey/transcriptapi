@@ -55,6 +55,12 @@ class StudentTranscriptCourse(BaseModel):
 class StudentTranscriptRecord(BaseModel):
     id: str
     source: str
+    documentId: str | None = None
+    documentUploadId: str | None = None
+    crtfyDocumentId: str | None = None
+    documentStorageProvider: str | None = None
+    documentStorageDepartment: str | None = None
+    documentContentUrl: str | None = None
     institution: str
     type: str
     uploadedAt: datetime | str

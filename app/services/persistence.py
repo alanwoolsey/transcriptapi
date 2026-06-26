@@ -51,6 +51,7 @@ class TranscriptPersistenceService:
         use_bedrock: bool,
         tenant_id: str,
         uploaded_by_user_id: UUID | None = None,
+        external_document: dict[str, Any] | None = None,
     ) -> dict[str, str]:
         if not self.is_enabled():
             raise ValueError("Database is not configured.")
@@ -101,17 +102,21 @@ class TranscriptPersistenceService:
 
                 upload.storage_key = build_document_storage_key(str(transcript.id), filename)
 
+                request_json = {
+                    "filename": filename,
+                    "content_type": content_type,
+                    "requested_document_type": requested_document_type,
+                    "use_bedrock": use_bedrock,
+                }
+                if external_document:
+                    request_json["external_document"] = {k: v for k, v in external_document.items() if v}
+
                 parse_run = TranscriptParseRun(
                     tenant_id=tenant.id,
                     transcript_id=transcript.id,
                     parser_name="transcript_pipeline",
                     parser_version="v1",
-                    request_json={
-                        "filename": filename,
-                        "content_type": content_type,
-                        "requested_document_type": requested_document_type,
-                        "use_bedrock": use_bedrock,
-                    },
+                    request_json=request_json,
                     response_json=None,
                     raw_text_excerpt=None,
                     warnings_json=[],
@@ -124,13 +129,17 @@ class TranscriptPersistenceService:
                 session.add(parse_run)
                 session.flush()
 
-            return {
+            response = {
                 "tenantId": str(tenant.id),
                 "documentUploadId": str(upload.id),
                 "transcriptId": str(transcript.id),
                 "parseRunId": str(parse_run.id),
                 "status": transcript.status,
             }
+            if external_document:
+                response["crtfyDocumentsDocumentId"] = external_document.get("document_id") or ""
+                response["documentContentUrl"] = external_document.get("content_url") or ""
+            return response
 
     def create_processing_upload_batch(
         self,
@@ -519,7 +528,8 @@ class TranscriptPersistenceService:
             upload = session.get(DocumentUpload, transcript.document_upload_id)
             parse_run = self._get_latest_parse_run(session, transcript.id, tenant.id)
             status = parse_run.status if parse_run else transcript.status
-            return {
+            external_document = self._external_document_from_parse_run(parse_run)
+            response = {
                 "transcriptId": str(transcript.id),
                 "documentUploadId": str(upload.id),
                 "parseRunId": str(parse_run.id) if parse_run else None,
@@ -527,6 +537,19 @@ class TranscriptPersistenceService:
                 "error": parse_run.error_message if parse_run else None,
                 "completed": status == "completed",
             }
+            if external_document:
+                response["crtfyDocumentsDocumentId"] = external_document.get("document_id") or None
+                response["documentContentUrl"] = external_document.get("content_url") or None
+            return response
+
+    def _external_document_from_parse_run(self, parse_run: TranscriptParseRun | None) -> dict[str, Any]:
+        if parse_run is None:
+            return {}
+        request_json = parse_run.request_json or {}
+        external_document = request_json.get("external_document") or {}
+        if not isinstance(external_document, dict):
+            return {}
+        return external_document
 
     def get_upload_batch_status(self, batch_id: str, tenant_id: str) -> dict[str, Any]:
         if not self.is_enabled():

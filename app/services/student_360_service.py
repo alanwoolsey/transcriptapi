@@ -1601,11 +1601,34 @@ class Student360Service:
         records: list[StudentTranscriptRecord] = []
         for bundle in bundles:
             payload = bundle.parse_run.response_json if bundle.parse_run and bundle.parse_run.response_json else {}
+            external_document = self._external_document_from_parse_run(bundle.parse_run)
             raw_courses = payload.get("courses") or []
+            raw_document = dict(payload) if payload else {}
+            if external_document:
+                raw_document.update({
+                    "crtfyDocumentId": external_document.get("document_id"),
+                    "documentStorageProvider": external_document.get("provider") or "crtfy_documents",
+                    "documentStorageDepartment": external_document.get("department") or "General",
+                    "documentContentUrl": external_document.get("content_url"),
+                    "content_url": external_document.get("content_url"),
+                    "documentStorage": {
+                        "provider": external_document.get("provider") or "crtfy_documents",
+                        "documentId": external_document.get("document_id"),
+                        "tenantId": external_document.get("tenant_id"),
+                        "contentUrl": external_document.get("content_url"),
+                        "department": external_document.get("department") or "General",
+                    },
+                })
             records.append(
                 StudentTranscriptRecord(
                     id=str(bundle.transcript.id),
                     source=bundle.upload.original_filename,
+                    documentId=external_document.get("document_id") or str(bundle.upload.id),
+                    documentUploadId=str(bundle.upload.id),
+                    crtfyDocumentId=external_document.get("document_id"),
+                    documentStorageProvider=external_document.get("provider") or ("crtfy_documents" if external_document else None),
+                    documentStorageDepartment=external_document.get("department") or ("General" if external_document else None),
+                    documentContentUrl=external_document.get("content_url"),
                     institution=self._safe_str(bundle.demographics.institution_name if bundle.demographics else None, "Unknown institution"),
                     type=self._title_case(bundle.transcript.document_type.replace("_", " ")) if bundle.transcript.document_type else "Transcript",
                     uploadedAt=bundle.upload.uploaded_at,
@@ -1617,10 +1640,19 @@ class Student360Service:
                     notes=self._resolve_transcript_note(bundle),
                     steps=self._build_steps(bundle),
                     courses=[StudentTranscriptCourse(**self._filter_course_fields(course)) for course in raw_courses],
-                    rawDocument=payload or None,
+                    rawDocument=raw_document or None,
                 )
             )
         return records
+
+    def _external_document_from_parse_run(self, parse_run: TranscriptParseRun | None) -> dict[str, Any]:
+        if parse_run is None:
+            return {}
+        request_json = parse_run.request_json or {}
+        external_document = request_json.get("external_document") or {}
+        if not isinstance(external_document, dict):
+            return {}
+        return external_document
 
     def _build_steps(self, bundle: _TranscriptBundle) -> list[StudentTimelineStep]:
         created = self._format_clock(bundle.upload.uploaded_at)

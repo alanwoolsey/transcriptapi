@@ -31,12 +31,24 @@ document_storage = DocumentStorageService()
 extraction_client = ExternalExtractionServiceClient()
 
 
-@router.post("/uploads", response_model=StartTranscriptUploadResponse | StartTranscriptUploadBatchResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/uploads",
+    response_model=StartTranscriptUploadResponse | StartTranscriptUploadBatchResponse,
+    response_model_exclude_none=True,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def start_transcript_upload(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     document_type: str = Form("auto"),
     use_bedrock: str | None = Form(None),
+    storage_provider: str | None = Form(None),
+    document_id: str | None = Form(None),
+    crtfy_documents_document_id: str | None = Form(None),
+    crtfy_documents_tenant_id: str | None = Form(None),
+    content_url: str | None = Form(None),
+    skip_storage: str | None = Form(None),
+    source: str | None = Form(None),
     auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
 ) -> StartTranscriptUploadResponse:
     content = await file.read()
@@ -46,6 +58,14 @@ async def start_transcript_upload(
     filename = file.filename or "upload.bin"
     normalized_use_bedrock = _normalize_use_bedrock(use_bedrock)
     tenant_id = str(auth_context.tenant.id)
+    external_document = _external_document_payload(
+        storage_provider=storage_provider,
+        document_id=document_id,
+        crtfy_documents_document_id=crtfy_documents_document_id,
+        crtfy_documents_tenant_id=crtfy_documents_tenant_id,
+        content_url=content_url,
+        source=source,
+    )
 
     try:
         if get_extension(filename) == ".zip":
@@ -96,12 +116,14 @@ async def start_transcript_upload(
             use_bedrock=normalized_use_bedrock,
             tenant_id=tenant_id,
             uploaded_by_user_id=auth_context.user.id,
+            external_document=external_document,
         )
-        document_storage.store_bytes(
-            storage_key=build_document_storage_key(upload_record["transcriptId"], filename),
-            content=content,
-            content_type=file.content_type,
-        )
+        if not _normalize_bool(skip_storage):
+            document_storage.store_bytes(
+                storage_key=build_document_storage_key(upload_record["transcriptId"], filename),
+                content=content,
+                content_type=file.content_type,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -122,6 +144,7 @@ async def start_transcript_upload(
 @router.get(
     "/uploads/{transcript_id}/status",
     response_model=TranscriptUploadStatusResponse,
+    response_model_exclude_none=True,
 )
 def get_transcript_upload_status(
     transcript_id: str = Path(...),
@@ -224,6 +247,33 @@ def _normalize_use_bedrock(value: str | None) -> bool:
     if normalized in {"1", "true", "yes", "on"}:
         return True
     return True
+
+
+def _normalize_bool(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _external_document_payload(
+    *,
+    storage_provider: str | None,
+    document_id: str | None,
+    crtfy_documents_document_id: str | None,
+    crtfy_documents_tenant_id: str | None,
+    content_url: str | None,
+    source: str | None,
+) -> dict[str, str]:
+    provider = (storage_provider or "").strip()
+    resolved_document_id = (crtfy_documents_document_id or document_id or "").strip()
+    resolved_content_url = (content_url or "").strip()
+    if provider != "crtfy_documents" and not resolved_document_id and not resolved_content_url:
+        return {}
+    return {
+        "provider": provider or "crtfy_documents",
+        "document_id": resolved_document_id,
+        "tenant_id": (crtfy_documents_tenant_id or "").strip(),
+        "content_url": resolved_content_url,
+        "source": (source or "crtfy_student").strip(),
+    }
 
 
 def _process_transcript_upload(

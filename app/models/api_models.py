@@ -193,6 +193,8 @@ class StartTranscriptUploadResponse(BaseModel):
     documentUploadId: str
     parseRunId: str
     status: str
+    crtfyDocumentsDocumentId: Optional[str] = None
+    documentContentUrl: Optional[str] = None
 
 
 class StartTranscriptUploadBatchItemResponse(BaseModel):
@@ -219,6 +221,8 @@ class TranscriptUploadStatusResponse(BaseModel):
     status: str
     error: Optional[str] = None
     completed: bool = False
+    crtfyDocumentsDocumentId: Optional[str] = None
+    documentContentUrl: Optional[str] = None
 
 
 class TranscriptUploadBatchStatusItemResponse(BaseModel):
