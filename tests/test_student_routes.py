@@ -124,6 +124,64 @@ def test_get_student_returns_detail_record(monkeypatch):
                 "fitNarrative": "Current transcript evidence from Grantsville High was parsed successfully and is available for review.",
                 "nextBestAction": "Open the student record and review the latest transcript outcome.",
             },
+            "application": {
+                "id": "APP-123",
+                "status": "Submitted",
+                "type": "Transfer application",
+                "entryTerm": "Fall 2026",
+                "campus": "Main",
+                "delivery": "On campus",
+                "startedAt": "2026-05-01T00:00:00Z",
+                "submittedAt": "2026-05-18T00:00:00Z",
+                "residency": "In state",
+                "studentType": "Transfer",
+                "nextStep": "Review missing transcript",
+            },
+            "financialAid": {
+                "usingFinancialAid": True,
+                "status": "In progress",
+                "fafsa": {
+                    "status": "Received",
+                    "receivedAt": "2026-05-20T00:00:00Z",
+                    "aidYear": "2026-2027",
+                    "sai": "3200",
+                    "dependencyStatus": "Dependent",
+                    "verificationStatus": "Not selected",
+                },
+                "packageStatus": "Estimated",
+                "estimatedAid": 12500,
+                "scholarshipStatus": "Offered",
+                "scholarshipAmount": 4000,
+                "nextStep": "Confirm award package",
+            },
+            "scholarshipOptions": [
+                {
+                    "id": "academic-merit",
+                    "name": "Academic Merit Scholarship",
+                    "amount": 6500,
+                    "owner": "Admissions",
+                    "description": "For applicants with strong academic performance.",
+                    "action": "Generate merit estimate",
+                    "matchScore": 88,
+                    "status": "Strong match",
+                    "evidence": ["Transcript GPA is 3.72."],
+                    "missing": [],
+                }
+            ],
+            "scholarshipOffers": [
+                {
+                    "id": "offer-1",
+                    "name": "Academic Merit Scholarship",
+                    "sourceType": "Institutional",
+                    "provider": "This institution",
+                    "amount": 5000,
+                    "status": "Offered",
+                    "offeredAt": "2026-06-15T00:00:00Z",
+                    "renewable": True,
+                    "requirements": "Maintain 3.0 GPA and full-time enrollment.",
+                    "notes": "Stackable with need-based aid.",
+                }
+            ],
         }
 
     monkeypatch.setattr(student_routes.student_service, "get_student", fake_get_student)
@@ -135,6 +193,10 @@ def test_get_student_returns_detail_record(monkeypatch):
     payload = response.json()
     assert payload["student"]["id"] == "student-1"
     assert payload["student"]["recommendation"]["nextBestAction"] == payload["student"]["nextBestAction"]
+    assert payload["student"]["application"]["status"] == "Submitted"
+    assert payload["student"]["financialAid"]["fafsa"]["aidYear"] == "2026-2027"
+    assert payload["student"]["scholarshipOptions"][0]["matchScore"] == 88
+    assert payload["student"]["scholarshipOffers"][0]["sourceType"] == "Institutional"
     assert captured["student_id"] == "student-1"
 
 
@@ -147,6 +209,60 @@ def test_get_student_returns_404_when_missing(monkeypatch):
     response = client.get("/api/v1/students/missing-student")
 
     assert response.status_code == 404
+
+
+def test_student_360_scholarship_helpers_normalize_state_payload():
+    service = Student360Service()
+    state = {
+        "scholarship_options": [
+            {
+                "id": "academic-merit",
+                "name": "Academic Merit Scholarship",
+                "amount": "$6,500",
+                "match_score": "88",
+                "evidence": ["Transcript GPA is 3.72.", ""],
+            }
+        ],
+        "scholarship_offers": [
+            {
+                "id": "offer-1",
+                "name": "Academic Merit Scholarship",
+                "source_type": "institutional",
+                "amount": "5000",
+                "offered_at": "2026-06-15",
+                "renewable": "true",
+            },
+            {
+                "id": "offer-2",
+                "name": "Community Foundation Award",
+                "sourceType": "External",
+                "amount": "1,500.50",
+                "offeredAt": "2026-06-10T00:00:00Z",
+                "renewable": False,
+            },
+        ],
+    }
+
+    options = service._build_scholarship_options(
+        state=state,
+        student=SimpleNamespace(latest_cumulative_gpa=3.2),
+        transcripts=[],
+        prospect=None,
+        program_name="Nursing BSN",
+    )
+    offers = service._build_scholarship_offers(state)
+    aid = service._build_financial_aid_summary(state={}, milestones=[], scholarship_offers=offers)
+
+    assert options[0].amount == 6500
+    assert options[0].matchScore == 88
+    assert options[0].evidence == ["Transcript GPA is 3.72."]
+    assert offers[0].sourceType == "Institutional"
+    assert offers[0].amount == 5000
+    assert offers[0].offeredAt == "2026-06-15T00:00:00Z"
+    assert offers[0].renewable is True
+    assert offers[1].sourceType == "External"
+    assert offers[1].amount == 1500.5
+    assert aid.scholarshipAmount == 6500.5
 
 
 def test_patch_student_updates_program(monkeypatch):

@@ -293,6 +293,240 @@ Index("ix_prospect_source_refs_tenant_prospect", ProspectSourceReference.tenant_
 Index("ix_prospect_source_refs_tenant_external", ProspectSourceReference.tenant_id, ProspectSourceReference.external_reference_id)
 
 
+class ProspectImportSource(Base):
+    __tablename__ = "prospect_import_sources"
+    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_prospect_import_sources_tenant_name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    source_type: Mapped[str] = mapped_column(Text, nullable=False)
+    source_category: Mapped[str] = mapped_column(Text, nullable=False)
+    default_lifecycle_stage: Mapped[str | None] = mapped_column(Text)
+    default_population: Mapped[str | None] = mapped_column(Text)
+    default_student_type: Mapped[str | None] = mapped_column(Text)
+    default_entry_term: Mapped[str | None] = mapped_column(Text)
+    default_mapping_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_prospect_import_sources_tenant_active", ProspectImportSource.tenant_id, ProspectImportSource.is_active)
+
+
+class ProspectImportBatch(Base):
+    __tablename__ = "prospect_import_batches"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("prospect_import_sources.id", ondelete="SET NULL"))
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    uploaded_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    import_mode: Mapped[str] = mapped_column(Text, nullable=False)
+    mapping_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    total_rows: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    new_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    matched_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    duplicate_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    created_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    updated_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    skipped_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+
+Index("ix_prospect_import_batches_tenant_created", ProspectImportBatch.tenant_id, ProspectImportBatch.created_at.desc())
+Index("ix_prospect_import_batches_tenant_source", ProspectImportBatch.tenant_id, ProspectImportBatch.source_id)
+
+
+class ProspectImportRow(Base):
+    __tablename__ = "prospect_import_rows"
+    __table_args__ = (UniqueConstraint("tenant_id", "batch_id", "row_number", name="uq_prospect_import_rows_batch_row"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    batch_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("prospect_import_batches.id", ondelete="CASCADE"), nullable=False)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("prospect_import_sources.id", ondelete="SET NULL"))
+    row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    normalized_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    matched_student_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="SET NULL"))
+    matched_prospect_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("prospects.id", ondelete="SET NULL"))
+    match_confidence: Mapped[int | None] = mapped_column(Integer)
+    error_messages_json: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_prospect_import_rows_tenant_batch", ProspectImportRow.tenant_id, ProspectImportRow.batch_id)
+Index("ix_prospect_import_rows_tenant_status", ProspectImportRow.tenant_id, ProspectImportRow.status)
+
+
+class ProspectImportException(Base):
+    __tablename__ = "prospect_import_exceptions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("prospect_import_batches.id", ondelete="CASCADE"))
+    row_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("prospect_import_rows.id", ondelete="CASCADE"))
+    exception_type: Mapped[str] = mapped_column(Text, nullable=False)
+    severity: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    assigned_to_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    resolution: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    resolved_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+
+
+Index("ix_prospect_import_exceptions_tenant_status", ProspectImportException.tenant_id, ProspectImportException.status)
+Index("ix_prospect_import_exceptions_tenant_batch", ProspectImportException.tenant_id, ProspectImportException.batch_id)
+
+
+class ProspectImportTemplate(Base):
+    __tablename__ = "prospect_import_templates"
+    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_prospect_import_templates_tenant_name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    source_type: Mapped[str] = mapped_column(Text, nullable=False)
+    source_detail: Mapped[str | None] = mapped_column(Text)
+    default_lifecycle_stage: Mapped[str | None] = mapped_column(Text)
+    field_mappings_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    normalization_rules_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    dedupe_rules_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    assignment_rules_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    campaign_rules_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    validation_rules_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_prospect_import_templates_tenant_type", ProspectImportTemplate.tenant_id, ProspectImportTemplate.source_type)
+
+
+class ProspectAssignmentRule(Base):
+    __tablename__ = "prospect_assignment_rules"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("prospect_import_sources.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    field: Mapped[str] = mapped_column(Text, nullable=False)
+    operator: Mapped[str] = mapped_column(Text, nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    owner_team_id: Mapped[str | None] = mapped_column(Text)
+    territory: Mapped[str | None] = mapped_column(Text)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("100"))
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_prospect_assignment_rules_tenant_source", ProspectAssignmentRule.tenant_id, ProspectAssignmentRule.source_id, ProspectAssignmentRule.active)
+
+
+class StudentAssignment(Base):
+    __tablename__ = "student_assignments"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    owner_team_id: Mapped[str | None] = mapped_column(Text)
+    territory: Mapped[str | None] = mapped_column(Text)
+    assignment_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    assigned_by_rule_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("prospect_assignment_rules.id", ondelete="SET NULL"))
+    assigned_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_assignments_tenant_student", StudentAssignment.tenant_id, StudentAssignment.student_id)
+
+
+class StudentSource(Base):
+    __tablename__ = "student_sources"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    source_name: Mapped[str] = mapped_column(Text, nullable=False)
+    source_type: Mapped[str] = mapped_column(Text, nullable=False)
+    source_detail: Mapped[str | None] = mapped_column(Text)
+    source_batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("prospect_import_batches.id", ondelete="SET NULL"))
+    primary_source: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    raw_source_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    first_seen_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    last_seen_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_sources_tenant_student", StudentSource.tenant_id, StudentSource.student_id)
+Index("ix_student_sources_tenant_source", StudentSource.tenant_id, StudentSource.source_name)
+
+
+class ProspectScheduledImport(Base):
+    __tablename__ = "prospect_scheduled_imports"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("prospect_import_sources.id", ondelete="CASCADE"))
+    mapping_template_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("prospect_import_templates.id", ondelete="SET NULL"))
+    delivery_method: Mapped[str] = mapped_column(Text, nullable=False)
+    inbound_folder: Mapped[str | None] = mapped_column(Text)
+    schedule: Mapped[str | None] = mapped_column(Text)
+    import_mode: Mapped[str] = mapped_column(Text, nullable=False)
+    failure_notification_email: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    last_run_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    next_run_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_prospect_scheduled_imports_tenant_status", ProspectScheduledImport.tenant_id, ProspectScheduledImport.status)
+
+
+class ProspectApiCredential(Base):
+    __tablename__ = "prospect_api_credentials"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("prospect_import_sources.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    key_prefix: Mapped[str] = mapped_column(Text, nullable=False)
+    key_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_prospect_api_credentials_tenant_active", ProspectApiCredential.tenant_id, ProspectApiCredential.active)
+
+
+class ProspectWebhookEvent(Base):
+    __tablename__ = "prospect_webhook_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("prospect_import_sources.id", ondelete="SET NULL"))
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    result_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    received_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_prospect_webhook_events_tenant_received", ProspectWebhookEvent.tenant_id, ProspectWebhookEvent.received_at.desc())
+
+
 class ProspectTranscriptUpload(Base):
     __tablename__ = "prospect_transcript_uploads"
 

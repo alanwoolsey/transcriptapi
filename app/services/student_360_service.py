@@ -38,12 +38,17 @@ from app.models.student_models import (
     Student360ListRecord,
     Student360ListResponse,
     Student360Record,
+    StudentApplicationSummary,
     StudentChecklistItem,
+    StudentFafsaSummary,
+    StudentFinancialAidSummary,
     StudentInteractionRecord,
     StudentOwnerSummary,
     StudentProgramSummary,
     StudentRecommendation,
     StudentReadinessSummary,
+    StudentScholarshipOffer,
+    StudentScholarshipOption,
     StudentTermGpa,
     StudentTimelineActor,
     StudentTimelineEntity,
@@ -1431,6 +1436,26 @@ class Student360Service:
         post_admit_milestones = self._serialize_post_admit_milestones(session, tenant_id, student.id)
         readiness = self._load_readiness_summary(session, tenant_id, student.id) or self._readiness_summary_from_stage(student.current_stage, student.risk_level)
         program_summary = StudentProgramSummary(id=(str(program.id) if program else None), name=(program.name if program else prospect.program_interest if prospect else "Transcript intake"))
+        student_type = prospect.population if prospect else self._student_type(student.accepted_credits)
+        application = self._build_application_summary(
+            student=student,
+            prospect=prospect,
+            student_type=student_type,
+            counselor_state=counselor_state,
+        )
+        scholarship_offers = self._build_scholarship_offers(counselor_state)
+        scholarship_options = self._build_scholarship_options(
+            state=counselor_state,
+            student=student,
+            transcripts=transcripts,
+            prospect=prospect,
+            program_name=program_summary.name,
+        )
+        financial_aid = self._build_financial_aid_summary(
+            state=counselor_state,
+            milestones=post_admit_milestones,
+            scholarship_offers=scholarship_offers,
+        )
         return Student360Record(
             id=str(student.id),
             studentId=student.external_student_id or str(student.id),
@@ -1440,8 +1465,8 @@ class Student360Service:
             phone=student.phone,
             program=program_summary,
             degreeProgram=program_summary.name,
-            population=prospect.population if prospect else self._student_type(student.accepted_credits),
-            studentType=prospect.population if prospect else self._student_type(student.accepted_credits),
+            population=student_type,
+            studentType=student_type,
             source=prospect.source if prospect else "transcript_first",
             sourceCategory=prospect.source_category if prospect else "direct",
             campaign=prospect.campaign if prospect else None,
@@ -1478,6 +1503,10 @@ class Student360Service:
             transcripts=transcripts,
             termGpa=self._build_term_gpa(transcripts),
             recommendation=recommendation,
+            application=application,
+            financialAid=financial_aid,
+            scholarshipOptions=scholarship_options,
+            scholarshipOffers=scholarship_offers,
         )
 
     def _get_transcript_derived_student(self, session: Session, tenant_id: UUID, student_id: str) -> Student360Record | None:
@@ -1545,6 +1574,16 @@ class Student360Service:
             transcripts=transcripts,
             termGpa=self._build_term_gpa(transcripts),
             recommendation=recommendation,
+            application=StudentApplicationSummary(
+                id=student_id,
+                status=stage,
+                type="Transfer application" if self._derive_credits_from_bundles(bundles) > 0 else "First-year application",
+                studentType="Transfer" if self._derive_credits_from_bundles(bundles) > 0 else "First Year",
+                nextStep=recommendation.nextBestAction,
+            ),
+            financialAid=StudentFinancialAidSummary(usingFinancialAid=None, fafsa=StudentFafsaSummary()),
+            scholarshipOptions=[],
+            scholarshipOffers=[],
         )
 
     def _load_transcripts_for_students(self, session: Session, tenant_id: UUID, student_ids: list[UUID]) -> dict[UUID, list[StudentTranscriptRecord]]:
@@ -1900,6 +1939,242 @@ class Student360Service:
             "bursar_account": {"system": "Bursar", "status": "not_connected"},
         }
         return placeholders.get(code)
+
+    def _build_application_summary(
+        self,
+        *,
+        student: Student,
+        prospect: Prospect | None,
+        student_type: str | None,
+        counselor_state: dict[str, Any],
+    ) -> StudentApplicationSummary:
+        raw = self._state_dict(counselor_state, "application", "applicationSummary")
+        status = raw.get("status") or canonical_pipeline_status(prospect.lifecycle_stage if prospect else student.current_stage)
+        submitted_at = raw.get("submittedAt") or raw.get("submitted_at")
+        if submitted_at is None and prospect and self._is_submitted_application_status(prospect.status, prospect.lifecycle_stage):
+            submitted_at = prospect.updated_at
+        return StudentApplicationSummary(
+            id=self._safe_optional_str(raw.get("id") or student.external_student_id or str(student.id)),
+            status=self._safe_optional_str(status),
+            type=self._safe_optional_str(raw.get("type") or self._application_type_label(student_type)),
+            entryTerm=self._safe_optional_str(raw.get("entryTerm") or raw.get("entry_term") or (prospect.term_interest if prospect else None)),
+            campus=self._safe_optional_str(raw.get("campus")),
+            delivery=self._safe_optional_str(raw.get("delivery")),
+            startedAt=self._iso_state_datetime(raw.get("startedAt") or raw.get("started_at") or (prospect.created_at if prospect else student.created_at)),
+            submittedAt=self._iso_state_datetime(submitted_at),
+            residency=self._safe_optional_str(raw.get("residency")),
+            studentType=self._safe_optional_str(raw.get("studentType") or raw.get("student_type") or self._title_case(student_type)),
+            nextStep=self._safe_optional_str(raw.get("nextStep") or raw.get("next_step") or counselor_state.get("nextAction")),
+        )
+
+    def _build_financial_aid_summary(
+        self,
+        *,
+        state: dict[str, Any],
+        milestones: list[dict[str, Any]],
+        scholarship_offers: list[StudentScholarshipOffer],
+    ) -> StudentFinancialAidSummary:
+        raw = self._state_dict(state, "financialAid", "financial_aid")
+        fafsa_raw = self._state_dict(raw, "fafsa")
+        financial_milestone = self._milestone_by_id(milestones, "financial_aid_package")
+        scholarship_milestone = self._milestone_by_id(milestones, "scholarship_status")
+        scholarship_amount = self._coerce_amount(raw.get("scholarshipAmount") or raw.get("scholarship_amount"))
+        if scholarship_amount is None:
+            scholarship_amount = self._sum_offer_amounts(scholarship_offers)
+        using_aid = raw.get("usingFinancialAid", raw.get("using_financial_aid"))
+        if using_aid is None:
+            using_aid = bool(fafsa_raw or raw.get("estimatedAid") or raw.get("estimated_aid") or scholarship_amount)
+        return StudentFinancialAidSummary(
+            usingFinancialAid=bool(using_aid),
+            status=self._safe_optional_str(raw.get("status") or (financial_milestone or {}).get("status")),
+            fafsa=StudentFafsaSummary(
+                status=self._safe_optional_str(fafsa_raw.get("status")),
+                receivedAt=self._iso_state_datetime(fafsa_raw.get("receivedAt") or fafsa_raw.get("received_at")),
+                aidYear=self._safe_optional_str(fafsa_raw.get("aidYear") or fafsa_raw.get("aid_year")),
+                sai=self._safe_optional_str(fafsa_raw.get("sai")),
+                dependencyStatus=self._safe_optional_str(fafsa_raw.get("dependencyStatus") or fafsa_raw.get("dependency_status")),
+                verificationStatus=self._safe_optional_str(fafsa_raw.get("verificationStatus") or fafsa_raw.get("verification_status")),
+            ),
+            packageStatus=self._safe_optional_str(raw.get("packageStatus") or raw.get("package_status") or (financial_milestone or {}).get("status")),
+            estimatedAid=self._coerce_amount(raw.get("estimatedAid") or raw.get("estimated_aid")),
+            scholarshipStatus=self._safe_optional_str(raw.get("scholarshipStatus") or raw.get("scholarship_status") or (scholarship_milestone or {}).get("status")),
+            scholarshipAmount=scholarship_amount,
+            nextStep=self._safe_optional_str(raw.get("nextStep") or raw.get("next_step")),
+        )
+
+    def _build_scholarship_options(
+        self,
+        *,
+        state: dict[str, Any],
+        student: Student,
+        transcripts: list[StudentTranscriptRecord],
+        prospect: Prospect | None,
+        program_name: str,
+    ) -> list[StudentScholarshipOption]:
+        raw_options = self._state_list(state, "scholarshipOptions", "scholarship_options")
+        options = [self._scholarship_option_from_raw(item, index) for index, item in enumerate(raw_options)]
+        options = [item for item in options if item is not None]
+        if options:
+            return options
+        gpa = self._to_float(student.latest_cumulative_gpa)
+        if gpa < 3.5:
+            return []
+        evidence = [f"Transcript GPA is {gpa:.2f}."]
+        if program_name and program_name != "Transcript intake":
+            evidence.append(f"Program interest is {program_name}.")
+        elif prospect and prospect.program_interest:
+            evidence.append(f"Program interest is {prospect.program_interest}.")
+        elif transcripts:
+            evidence.append("Transcript evidence is available for review.")
+        return [
+            StudentScholarshipOption(
+                id="academic-merit",
+                name="Academic Merit Scholarship",
+                amount=None,
+                owner="Admissions",
+                description="For applicants with strong academic performance.",
+                action="Generate merit estimate",
+                matchScore=min(95, max(80, int(round(gpa * 24)))),
+                status="Strong match",
+                evidence=evidence,
+                missing=[],
+            )
+        ]
+
+    def _build_scholarship_offers(self, state: dict[str, Any]) -> list[StudentScholarshipOffer]:
+        raw_offers = self._state_list(state, "scholarshipOffers", "scholarship_offers")
+        offers = [self._scholarship_offer_from_raw(item, index) for index, item in enumerate(raw_offers)]
+        return [item for item in offers if item is not None]
+
+    def _scholarship_option_from_raw(self, item: Any, index: int) -> StudentScholarshipOption | None:
+        if not isinstance(item, dict):
+            return None
+        name = self._safe_optional_str(item.get("name"))
+        if not name:
+            return None
+        return StudentScholarshipOption(
+            id=self._safe_optional_str(item.get("id")) or f"scholarship-option-{index + 1}",
+            name=name,
+            amount=self._coerce_amount(item.get("amount")),
+            owner=self._safe_optional_str(item.get("owner")),
+            description=self._safe_optional_str(item.get("description")),
+            action=self._safe_optional_str(item.get("action")),
+            matchScore=self._coerce_int(item.get("matchScore") or item.get("match_score")),
+            status=self._safe_optional_str(item.get("status")),
+            evidence=self._string_list(item.get("evidence")),
+            missing=self._string_list(item.get("missing")),
+        )
+
+    def _scholarship_offer_from_raw(self, item: Any, index: int) -> StudentScholarshipOffer | None:
+        if not isinstance(item, dict):
+            return None
+        name = self._safe_optional_str(item.get("name"))
+        if not name:
+            return None
+        return StudentScholarshipOffer(
+            id=self._safe_optional_str(item.get("id")) or f"scholarship-offer-{index + 1}",
+            name=name,
+            sourceType=self._scholarship_source_type(item.get("sourceType") or item.get("source_type")),
+            provider=self._safe_optional_str(item.get("provider")),
+            amount=self._coerce_amount(item.get("amount")),
+            status=self._safe_optional_str(item.get("status")),
+            offeredAt=self._iso_state_datetime(item.get("offeredAt") or item.get("offered_at")),
+            renewable=self._coerce_bool(item.get("renewable")),
+            requirements=self._safe_optional_str(item.get("requirements")),
+            notes=self._safe_optional_str(item.get("notes")),
+        )
+
+    def _state_dict(self, state: dict[str, Any], *keys: str) -> dict[str, Any]:
+        for key in keys:
+            value = state.get(key)
+            if isinstance(value, dict):
+                return dict(value)
+        return {}
+
+    def _state_list(self, state: dict[str, Any], *keys: str) -> list[Any]:
+        for key in keys:
+            value = state.get(key)
+            if isinstance(value, list):
+                return value
+        return []
+
+    def _milestone_by_id(self, milestones: list[dict[str, Any]], milestone_id: str) -> dict[str, Any] | None:
+        return next((item for item in milestones if item.get("id") == milestone_id), None)
+
+    def _sum_offer_amounts(self, offers: list[StudentScholarshipOffer]) -> float | int | None:
+        amounts = [offer.amount for offer in offers if offer.amount is not None and (offer.status or "").lower() not in {"declined", "rejected"}]
+        if not amounts:
+            return None
+        total = sum(float(amount) for amount in amounts)
+        return int(total) if total.is_integer() else round(total, 2)
+
+    def _scholarship_source_type(self, value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized == "external":
+            return "External"
+        return "Institutional"
+
+    def _coerce_amount(self, value: Any) -> float | int | None:
+        if value is None or value == "":
+            return None
+        try:
+            numeric = float(str(value).replace("$", "").replace(",", "").strip())
+        except (TypeError, ValueError):
+            return None
+        return int(numeric) if numeric.is_integer() else round(numeric, 2)
+
+    def _coerce_int(self, value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            return int(round(float(value)))
+        except (TypeError, ValueError):
+            return None
+
+    def _coerce_bool(self, value: Any) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in {"true", "yes", "1"}:
+            return True
+        if normalized in {"false", "no", "0"}:
+            return False
+        return None
+
+    def _safe_optional_str(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    def _string_list(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    def _iso_state_datetime(self, value: Any) -> str | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            try:
+                dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                return self._safe_optional_str(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def _is_submitted_application_status(self, status: str | None, lifecycle_stage: str | None) -> bool:
+        values = f"{status or ''} {lifecycle_stage or ''}".lower()
+        return any(token in values for token in ("submitted", "complete", "admitted", "deposited", "registered"))
+
+    def _application_type_label(self, student_type: str | None) -> str:
+        normalized = self._title_case(student_type)
+        return f"{normalized} application" if normalized else "Application"
 
     def _recruitment_state(self, state: dict[str, Any]) -> dict[str, Any]:
         recruitment = dict(state.get("recruitment") or {})

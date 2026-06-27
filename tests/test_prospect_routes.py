@@ -90,6 +90,88 @@ def test_create_prospect_inquiry_returns_live_summary(monkeypatch):
     assert captured["payload"].email == "mira@example.edu"
 
 
+def test_list_prospect_import_sources_returns_sources(monkeypatch):
+    from app.api import prospect_routes
+
+    monkeypatch.setattr(
+        prospect_routes.prospect_service,
+        "list_import_sources",
+        lambda db, tenant_id: {
+            "sources": [
+                {
+                    "id": "source-1",
+                    "name": "Fall Search",
+                    "sourceType": "college_board_search",
+                    "sourceCategory": "recruitment",
+                    "defaultLifecycleStage": "prospect",
+                    "defaultPopulation": "first_year",
+                    "defaultStudentType": "first_year",
+                    "defaultEntryTerm": "Fall 2026",
+                    "defaultMapping": {},
+                    "isActive": True,
+                    "createdAt": "2026-06-27T12:00:00Z",
+                }
+            ]
+        },
+    )
+
+    response = TestClient(_build_test_app()).get("/api/v1/prospects/import-sources")
+
+    assert response.status_code == 200
+    assert response.json()["sources"][0]["name"] == "Fall Search"
+
+
+def test_preview_prospect_import_returns_counts(monkeypatch):
+    from app.api import prospect_routes
+
+    captured = {}
+
+    def fake_preview(db, *, tenant_id, payload):
+        captured["payload"] = payload
+        return {
+            "counts": {"total": 1, "new": 1},
+            "rows": [{"rowNumber": 1, "action": "create", "firstName": "Mira", "lastName": "Holloway"}],
+            "issues": [],
+        }
+
+    monkeypatch.setattr(prospect_routes.prospect_service, "preview_import_rows", fake_preview)
+
+    response = TestClient(_build_test_app()).post(
+        "/api/v1/prospects/imports/preview",
+        json={
+            "filename": "prospects.csv",
+            "mapping": {"First": "firstName", "Last": "lastName", "Email": "email"},
+            "rows": [{"First": "Mira", "Last": "Holloway", "Email": "mira@example.edu"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["counts"]["new"] == 1
+    assert captured["payload"].filename == "prospects.csv"
+
+
+def test_confirm_prospect_import_returns_batch(monkeypatch):
+    from app.api import prospect_routes
+
+    monkeypatch.setattr(
+        prospect_routes.prospect_service,
+        "import_rows",
+        lambda db, **kwargs: {"batchId": "batch-1", "counts": {"total": 1, "created": 1}, "status": "completed", "issues": []},
+    )
+
+    response = TestClient(_build_test_app()).post(
+        "/api/v1/prospects/imports",
+        json={
+            "filename": "prospects.csv",
+            "mapping": {"First": "firstName", "Last": "lastName", "Email": "email"},
+            "rows": [{"First": "Mira", "Last": "Holloway", "Email": "mira@example.edu"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["batchId"] == "batch-1"
+
+
 def test_create_prospect_transcript_upload_returns_upload(monkeypatch):
     from app.api import prospect_routes
 

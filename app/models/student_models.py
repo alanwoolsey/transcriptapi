@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
@@ -87,6 +87,66 @@ class StudentRecommendation(BaseModel):
     nextBestAction: str
 
 
+class StudentApplicationSummary(BaseModel):
+    id: str | None = None
+    status: str | None = None
+    type: str | None = None
+    entryTerm: str | None = None
+    campus: str | None = None
+    delivery: str | None = None
+    startedAt: str | None = None
+    submittedAt: str | None = None
+    residency: str | None = None
+    studentType: str | None = None
+    nextStep: str | None = None
+
+
+class StudentFafsaSummary(BaseModel):
+    status: str | None = None
+    receivedAt: str | None = None
+    aidYear: str | None = None
+    sai: str | None = None
+    dependencyStatus: str | None = None
+    verificationStatus: str | None = None
+
+
+class StudentFinancialAidSummary(BaseModel):
+    usingFinancialAid: bool | None = None
+    status: str | None = None
+    fafsa: StudentFafsaSummary | None = None
+    packageStatus: str | None = None
+    estimatedAid: float | int | None = None
+    scholarshipStatus: str | None = None
+    scholarshipAmount: float | int | None = None
+    nextStep: str | None = None
+
+
+class StudentScholarshipOption(BaseModel):
+    id: str
+    name: str
+    amount: float | int | None = None
+    owner: str | None = None
+    description: str | None = None
+    action: str | None = None
+    matchScore: int | None = None
+    status: str | None = None
+    evidence: list[str] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+
+
+class StudentScholarshipOffer(BaseModel):
+    id: str
+    name: str
+    sourceType: Literal["Institutional", "External"]
+    provider: str | None = None
+    amount: float | int | None = None
+    status: str | None = None
+    offeredAt: str | None = None
+    renewable: bool | None = None
+    requirements: str | None = None
+    notes: str | None = None
+
+
 class Student360ListRecord(BaseModel):
     id: str
     studentId: str | None = None
@@ -134,6 +194,10 @@ class Student360ListRecord(BaseModel):
     transcripts: list[StudentTranscriptRecord] | None = None
     termGpa: list[StudentTermGpa] | None = None
     recommendation: StudentRecommendation | None = None
+    application: StudentApplicationSummary | None = None
+    financialAid: StudentFinancialAidSummary | None = None
+    scholarshipOptions: list[StudentScholarshipOption] = Field(default_factory=list)
+    scholarshipOffers: list[StudentScholarshipOffer] = Field(default_factory=list)
 
 
 class Student360Record(Student360ListRecord):
