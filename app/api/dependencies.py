@@ -112,6 +112,20 @@ def require_any_permission(*permission_codes: str):
     return dependency
 
 
+def require_any_role(*role_codes: str):
+    def dependency(auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context)) -> AuthenticatedTenantContext:
+        roles = set(getattr(auth_context.authorization, "roles", set()) or set())
+        base_role = getattr(auth_context.authorization, "base_role", None)
+        if base_role:
+            roles.add(base_role)
+        if not any(role_code in roles for role_code in role_codes):
+            joined = ", ".join(role_codes)
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Missing one of roles: {joined}")
+        return auth_context
+
+    return dependency
+
+
 def require_sensitivity_tier(tier: str):
     def dependency(auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context)) -> AuthenticatedTenantContext:
         if not auth_context.authorization.can_access_tier(tier):

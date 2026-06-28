@@ -16,6 +16,7 @@ from app.api.roadmap_routes import router as roadmap_router
 from app.api.student_routes import router as student_router
 from app.api.trust_routes import router as trust_router
 from app.api.routes import router as transcript_router
+from app.api.utility_import_routes import router as utility_import_router
 from app.api.work_routes import router as work_router
 from app.api.workflow_routes import router as workflow_router
 from app.core.config import settings
@@ -72,5 +73,6 @@ app.include_router(student_router, prefix="/api/v1")
 app.include_router(roadmap_router, prefix="/api/v1")
 app.include_router(trust_router, prefix="/api/v1")
 app.include_router(transcript_router, prefix="/api/v1")
+app.include_router(utility_import_router, prefix="/api/v1")
 app.include_router(work_router, prefix="/api/v1")
 app.include_router(workflow_router, prefix="/api/v1")
