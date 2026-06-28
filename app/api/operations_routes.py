@@ -400,7 +400,9 @@ def create_platform_tenant_admin(
     auth_context: AuthenticatedTenantContext = Depends(require_permission("platform_tenant_admins_create")),
 ) -> AdminUserItem:
     try:
-        item = operations_service.create_platform_tenant_admin(auth_context.user.id, tenant_id, payload)
+        item = operations_service.create_platform_tenant_admin(auth_context.user.id, tenant_id, payload, auth_context.tenant.id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if item is None:
@@ -427,6 +429,8 @@ def create_admin_user(
 ) -> AdminUserItem:
     try:
         return operations_service.create_admin_user(auth_context.tenant.id, auth_context.user.id, payload)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -450,6 +454,8 @@ def update_admin_user(
 ) -> AdminUserItem:
     try:
         item = operations_service.update_admin_user(auth_context.tenant.id, auth_context.user.id, user_id, payload)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if item is None:

@@ -1326,6 +1326,7 @@ class OperationsService:
         actor_user_id: UUID,
         tenant_id: str,
         payload: PlatformTenantAdminCreateRequest,
+        actor_tenant_id: UUID | None = None,
     ) -> AdminUserItem | None:
         try:
             resolved_tenant_id = UUID(tenant_id)
@@ -1336,6 +1337,13 @@ class OperationsService:
             tenant = session.get(Tenant, resolved_tenant_id)
             if tenant is None:
                 return None
+            self._enforce_admin_role_change(
+                session,
+                actor_tenant_id or resolved_tenant_id,
+                actor_user_id,
+                payload.baseRole or "tenant_admin",
+                payload.roles or ["tenant_admin"],
+            )
         admin_payload = payload.model_copy(
             update={
                 "roles": payload.roles or ["tenant_admin"],
@@ -1383,6 +1391,7 @@ class OperationsService:
         session_factory = self.session_factory()
         with session_factory() as session:
             self.rbac_service.sync_seed_data(session)
+            self._enforce_admin_role_change(session, tenant_id, actor_user_id, payload.baseRole, payload.roles)
             existing = session.execute(select(AppUser).where(AppUser.email == payload.email).limit(1)).scalar_one_or_none()
             if existing is not None:
                 raise ValueError("User with this email already exists.")
@@ -1460,6 +1469,16 @@ class OperationsService:
             user, membership = row
             current_email = user.email or ""
             before = self._serialize_admin_user(session, tenant_id, user, membership).model_dump(mode="json")
+            requested_base_role = payload.baseRole if payload.baseRole is not None else before["baseRole"]
+            requested_roles = payload.roles if payload.roles is not None else before["roles"]
+            requested_rights_change = (
+                payload.baseRole is not None
+                or payload.roles is not None
+                or payload.sensitivityTiers is not None
+                or payload.scopes is not None
+            )
+            if requested_rights_change:
+                self._enforce_admin_role_change(session, tenant_id, actor_user_id, requested_base_role, requested_roles)
             if payload.displayName is not None:
                 user.display_name = payload.displayName.strip()
             if payload.baseRole is not None:
@@ -1883,6 +1902,40 @@ class OperationsService:
                         active=True,
                     )
                 )
+
+    def _enforce_admin_role_change(
+        self,
+        session: Session,
+        tenant_id: UUID,
+        actor_user_id: UUID,
+        base_role: str | None,
+        roles: list[str] | tuple[str, ...] | None,
+    ) -> None:
+        actor_membership = session.execute(
+            select(TenantUserMembership)
+            .where(
+                TenantUserMembership.tenant_id == tenant_id,
+                TenantUserMembership.user_id == actor_user_id,
+                TenantUserMembership.status.in_(["active", "invited"]),
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        actor_profile = self.rbac_service.resolve_profile(
+            session,
+            tenant_id=tenant_id,
+            user_id=actor_user_id,
+            membership_role=actor_membership.role if actor_membership else None,
+        )
+        is_master_admin = "master_tenant_admin" in actor_profile.roles or actor_profile.base_role == "master_tenant_admin"
+        is_tenant_admin = is_master_admin or "tenant_admin" in actor_profile.roles or actor_profile.base_role == "tenant_admin"
+        if not is_tenant_admin:
+            raise PermissionError("Only a tenant admin or master tenant admin can change user rights.")
+
+        requested_roles = {role for role in (roles or []) if role}
+        if base_role:
+            requested_roles.add(base_role)
+        if "master_tenant_admin" in requested_roles and not is_master_admin:
+            raise PermissionError("Only a master tenant admin can assign the master tenant admin role.")
 
     def _write_admin_audit(
         self,

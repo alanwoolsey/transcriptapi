@@ -274,6 +274,28 @@ def test_create_admin_user_returns_created_record(monkeypatch):
     assert response.json()["status"] == "invited"
 
 
+def test_create_admin_user_maps_permission_error_to_403(monkeypatch):
+    from app.api import operations_routes
+
+    def fake_create_admin_user(*args, **kwargs):
+        raise PermissionError("Only a tenant admin or master tenant admin can change user rights.")
+
+    monkeypatch.setattr(operations_routes.operations_service, "create_admin_user", fake_create_admin_user)
+
+    response = TestClient(_build_test_app()).post(
+        "/api/v1/admin/users",
+        json={
+            "email": "newuser@example.edu",
+            "displayName": "New User",
+            "baseRole": "tenant_admin",
+            "roles": ["tenant_admin"],
+        },
+    )
+
+    assert response.status_code == 403
+    assert "Only a tenant admin" in response.json()["detail"]
+
+
 def test_get_platform_tenants_returns_paginated_payload(monkeypatch):
     from app.api import operations_routes
 
@@ -417,8 +439,9 @@ def test_create_platform_tenant_admin_returns_created_record(monkeypatch):
     tenant_id = str(uuid4())
     observed = {}
 
-    def fake_create_platform_tenant_admin(actor_user_id, requested_tenant_id, payload):
+    def fake_create_platform_tenant_admin(actor_user_id, requested_tenant_id, payload, actor_tenant_id=None):
         observed["tenant_id"] = requested_tenant_id
+        observed["actor_tenant_id"] = actor_tenant_id
         observed["payload"] = payload
         return {
             "userId": str(uuid4()),
@@ -457,8 +480,26 @@ def test_create_platform_tenant_admin_returns_created_record(monkeypatch):
 
     assert response.status_code == 201
     assert observed["tenant_id"] == tenant_id
+    assert observed["actor_tenant_id"] is not None
     assert observed["payload"].email == "admin@acme.edu"
     assert response.json()["roles"] == ["tenant_admin"]
+
+
+def test_create_platform_tenant_admin_maps_permission_error_to_403(monkeypatch):
+    from app.api import operations_routes
+
+    def fake_create_platform_tenant_admin(*args, **kwargs):
+        raise PermissionError("Only a master tenant admin can assign the master tenant admin role.")
+
+    monkeypatch.setattr(operations_routes.operations_service, "create_platform_tenant_admin", fake_create_platform_tenant_admin)
+
+    response = TestClient(_build_test_app()).post(
+        f"/api/v1/platform/tenants/{uuid4()}/admins",
+        json={"email": "admin@acme.edu", "displayName": "Acme Admin", "baseRole": "master_tenant_admin", "roles": ["master_tenant_admin"]},
+    )
+
+    assert response.status_code == 403
+    assert "Only a master tenant admin" in response.json()["detail"]
 
 
 def test_get_admin_user_returns_404_when_missing(monkeypatch):
@@ -511,6 +552,23 @@ def test_patch_admin_user_returns_updated_record(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["displayName"] == "Jane Smith"
+
+
+def test_patch_admin_user_maps_permission_error_to_403(monkeypatch):
+    from app.api import operations_routes
+
+    def fake_update_admin_user(*args, **kwargs):
+        raise PermissionError("Only a master tenant admin can assign the master tenant admin role.")
+
+    monkeypatch.setattr(operations_routes.operations_service, "update_admin_user", fake_update_admin_user)
+
+    response = TestClient(_build_test_app()).patch(
+        f"/api/v1/admin/users/{uuid4()}",
+        json={"baseRole": "master_tenant_admin", "roles": ["master_tenant_admin"]},
+    )
+
+    assert response.status_code == 403
+    assert "Only a master tenant admin" in response.json()["detail"]
 
 
 def test_deactivate_admin_user_surfaces_forbidden(monkeypatch):
