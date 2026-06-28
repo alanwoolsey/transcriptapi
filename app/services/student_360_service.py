@@ -171,7 +171,18 @@ class Student360Service:
 
         student = self._find_existing_student_for_create(db, tenant_id, external_id, email, phone)
         if student is None:
-            student = Student(tenant_id=tenant_id, external_student_id=external_id)
+            student = Student(
+                tenant_id=tenant_id,
+                external_student_id=external_id,
+                first_name=first_name,
+                last_name=last_name,
+                preferred_name=first_name,
+                email=email,
+                phone=phone,
+                current_stage=stage,
+                risk_level="low",
+                latest_activity_at=now,
+            )
             db.add(student)
 
         institution = self._ensure_student_institution(db, tenant_id, institution_name)
