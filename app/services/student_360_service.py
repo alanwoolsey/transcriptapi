@@ -23,8 +23,10 @@ from app.db.models import (
     StudentChecklistItem as DbStudentChecklistItem,
     StudentDecisionReadiness,
     StudentEnrollmentMilestone,
+    StudentIdentifier,
     StudentInteraction,
     StudentNote,
+    StudentSource,
     StudentTask,
     StudentYieldScore,
     StudentWorkState,
@@ -40,6 +42,7 @@ from app.models.student_models import (
     Student360Record,
     StudentApplicationSummary,
     StudentChecklistItem,
+    StudentCreateRequest,
     StudentFafsaSummary,
     StudentFinancialAidSummary,
     StudentInteractionRecord,
@@ -142,6 +145,102 @@ class Student360Service:
                 program=program,
             )
             return Student360ListResponse(students=transcript_students[offset : offset + limit], total=len(transcript_students))
+
+    def create_student(
+        self,
+        db: Session,
+        tenant_id: UUID,
+        actor_user_id: UUID,
+        payload: StudentCreateRequest,
+        authorization: Any | None = None,
+    ) -> Student360Record:
+        now = datetime.now(timezone.utc)
+        external_id = self._safe_optional_str(payload.studentId or payload.id)
+        first_name, last_name = self._student_name_parts(payload)
+        if not first_name and not last_name:
+            raise ValueError("Student first name or last name is required.")
+
+        email = self._normalize_optional_email(payload.email)
+        phone = self._safe_optional_str(payload.phone)
+        population = self._normalize_population(payload.population or payload.studentType or "prospect")
+        source = self._normalize_key(payload.source or "manual_entry")
+        source_category = self._safe_optional_str(payload.sourceCategory) or "direct"
+        stage = self._normalize_key(payload.stage or "prospect")
+        program_name = self._safe_optional_str(payload.programInterest or payload.degreeProgram or payload.program)
+        institution_name = self._safe_optional_str(payload.institutionGoal)
+
+        student = self._find_existing_student_for_create(db, tenant_id, external_id, email, phone)
+        if student is None:
+            student = Student(tenant_id=tenant_id, external_student_id=external_id)
+            db.add(student)
+
+        institution = self._ensure_student_institution(db, tenant_id, institution_name)
+        program_row = self._ensure_student_program(db, tenant_id, program_name, institution)
+
+        student.external_student_id = external_id or student.external_student_id
+        student.first_name = first_name or student.first_name
+        student.last_name = last_name or student.last_name
+        student.preferred_name = first_name or student.preferred_name
+        student.email = email or student.email
+        student.phone = phone or student.phone
+        student.city = self._safe_optional_str(payload.city) or student.city
+        student.state = self._safe_optional_str(payload.state) or student.state
+        student.country = self._safe_optional_str(payload.country) or student.country
+        student.target_program_id = program_row.id if program_row else student.target_program_id
+        student.target_institution_id = institution.id if institution else student.target_institution_id
+        student.current_stage = stage
+        student.risk_level = student.risk_level or "low"
+        student.summary = student.summary or f"{self._join_name(first_name, last_name, fallback='Student')} added from {self._title_case(source)}."
+        student.latest_activity_at = now
+        student.updated_at = now
+        db.flush()
+
+        if external_id:
+            self._ensure_student_identifier(db, tenant_id, student.id, external_id, source)
+        self._ensure_student_source(
+            db,
+            tenant_id=tenant_id,
+            student_id=student.id,
+            source=source,
+            source_category=source_category,
+            payload=payload,
+            now=now,
+        )
+        if email:
+            self._upsert_student_prospect(
+                db,
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                student=student,
+                payload=payload,
+                email=email,
+                phone=phone,
+                population=population,
+                source=source,
+                source_category=source_category,
+                stage=stage,
+                now=now,
+            )
+
+        self._write_student_audit(
+            db,
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            student_id=student.id,
+            action="student_created",
+            metadata={"externalStudentId": student.external_student_id, "source": source, "stage": stage},
+            occurred_at=now,
+        )
+
+        from app.services.admissions_ops_service import AdmissionsOpsService
+
+        AdmissionsOpsService(session_factory=self.session_factory)._ensure_student_state_for_student(db, tenant_id, student)
+        db.commit()
+
+        record = self.get_student(tenant_id, student.external_student_id or str(student.id), authorization=authorization)
+        if record is None:
+            raise ValueError("Student was created but could not be loaded.")
+        return record
 
     def get_student(self, tenant_id: UUID, student_id: str, authorization: Any | None = None) -> Student360Record | None:
         session_factory = self.session_factory()
@@ -869,6 +968,254 @@ class Student360Service:
             if row is not None:
                 return row
         return None
+
+    def _find_existing_student_for_create(
+        self,
+        session: Session,
+        tenant_id: UUID,
+        external_id: str | None,
+        email: str | None,
+        phone: str | None,
+    ) -> Student | None:
+        if external_id:
+            student = self._resolve_student_row(session, tenant_id, external_id)
+            if student is not None:
+                return student
+            identifier_student_id = session.execute(
+                select(StudentIdentifier.student_id)
+                .where(
+                    StudentIdentifier.tenant_id == tenant_id,
+                    StudentIdentifier.identifier_value == external_id,
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+            if identifier_student_id is not None:
+                return session.get(Student, identifier_student_id)
+        predicates = []
+        if email:
+            predicates.append(func.lower(Student.email) == email.lower())
+        if phone:
+            predicates.append(Student.phone == phone)
+        if not predicates:
+            return None
+        return session.execute(select(Student).where(Student.tenant_id == tenant_id, or_(*predicates)).limit(1)).scalar_one_or_none()
+
+    def _ensure_student_identifier(self, session: Session, tenant_id: UUID, student_id: UUID, external_id: str, source: str) -> None:
+        existing = session.execute(
+            select(StudentIdentifier)
+            .where(
+                StudentIdentifier.tenant_id == tenant_id,
+                StudentIdentifier.identifier_type == "external_source_id",
+                StudentIdentifier.identifier_value == external_id,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing is None:
+            session.add(
+                StudentIdentifier(
+                    tenant_id=tenant_id,
+                    student_id=student_id,
+                    identifier_type="external_source_id",
+                    identifier_value=external_id,
+                    source=source,
+                    is_verified=False,
+                )
+            )
+        elif existing.student_id != student_id:
+            existing.student_id = student_id
+
+    def _ensure_student_source(
+        self,
+        session: Session,
+        *,
+        tenant_id: UUID,
+        student_id: UUID,
+        source: str,
+        source_category: str,
+        payload: StudentCreateRequest,
+        now: datetime,
+    ) -> None:
+        existing = session.execute(
+            select(StudentSource)
+            .where(
+                StudentSource.tenant_id == tenant_id,
+                StudentSource.student_id == student_id,
+                StudentSource.source_name == source,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        raw_source = payload.model_dump(mode="json", exclude_none=True)
+        if existing is None:
+            has_source = session.execute(
+                select(StudentSource.id)
+                .where(StudentSource.tenant_id == tenant_id, StudentSource.student_id == student_id)
+                .limit(1)
+            ).scalar_one_or_none()
+            session.add(
+                StudentSource(
+                    tenant_id=tenant_id,
+                    student_id=student_id,
+                    source_name=source,
+                    source_type=source,
+                    source_detail=source_category,
+                    source_batch_id=None,
+                    primary_source=has_source is None,
+                    raw_source_json=raw_source,
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+        else:
+            existing.source_detail = source_category
+            existing.raw_source_json = raw_source
+            existing.last_seen_at = now
+
+    def _upsert_student_prospect(
+        self,
+        session: Session,
+        *,
+        tenant_id: UUID,
+        actor_user_id: UUID,
+        student: Student,
+        payload: StudentCreateRequest,
+        email: str,
+        phone: str | None,
+        population: str,
+        source: str,
+        source_category: str,
+        stage: str,
+        now: datetime,
+    ) -> None:
+        prospect = session.execute(
+            select(Prospect)
+            .where(
+                Prospect.tenant_id == tenant_id,
+                or_(
+                    Prospect.student_id == student.id,
+                    func.lower(Prospect.email) == email.lower(),
+                ),
+            )
+            .order_by(Prospect.updated_at.desc(), Prospect.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if prospect is None:
+            prospect = Prospect(
+                tenant_id=tenant_id,
+                first_name=student.first_name or "Student",
+                last_name=student.last_name or "",
+                email=email,
+                population=population,
+                lifecycle_stage=stage,
+                status="new",
+                owner_user_id=student.advisor_user_id or actor_user_id,
+                source=source,
+                source_category=source_category,
+                consent_captured=False,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(prospect)
+            session.flush()
+        prospect.student_id = student.id
+        prospect.first_name = student.first_name or prospect.first_name
+        prospect.last_name = student.last_name or prospect.last_name
+        prospect.email = email
+        prospect.phone = phone
+        prospect.population = population
+        prospect.program_interest = self._safe_optional_str(payload.programInterest or payload.degreeProgram or payload.program)
+        prospect.term_interest = self._safe_optional_str(payload.termInterest)
+        prospect.source = source
+        prospect.source_category = source_category
+        prospect.campaign = self._safe_optional_str(payload.campaign)
+        prospect.lifecycle_stage = stage
+        prospect.status = "new" if prospect.status in {None, ""} else prospect.status
+        prospect.updated_at = now
+
+        source_ref = session.execute(
+            select(ProspectSourceReference)
+            .where(
+                ProspectSourceReference.tenant_id == tenant_id,
+                ProspectSourceReference.prospect_id == prospect.id,
+                ProspectSourceReference.external_reference_id == student.external_student_id,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if student.external_student_id and source_ref is None:
+            session.add(
+                ProspectSourceReference(
+                    tenant_id=tenant_id,
+                    prospect_id=prospect.id,
+                    source=source,
+                    source_category=source_category,
+                    campaign=prospect.campaign,
+                    external_reference_id=student.external_student_id,
+                    metadata_json={"createdByUserId": str(actor_user_id)},
+                    captured_at=now,
+                )
+            )
+
+    def _ensure_student_institution(self, session: Session, tenant_id: UUID, name: str | None) -> Institution | None:
+        if not name:
+            return None
+        existing = session.execute(
+            select(Institution)
+            .where(Institution.tenant_id == tenant_id, func.lower(Institution.name) == name.lower())
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing is not None:
+            return existing
+        institution = Institution(tenant_id=tenant_id, name=name, state=name if len(name) == 2 else None, country="US")
+        session.add(institution)
+        session.flush()
+        return institution
+
+    def _ensure_student_program(self, session: Session, tenant_id: UUID, name: str | None, institution: Institution | None) -> Program | None:
+        if not name:
+            return None
+        existing = session.execute(
+            select(Program)
+            .where(Program.tenant_id == tenant_id, func.lower(Program.name) == name.lower())
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing is not None:
+            return existing
+        program = Program(
+            tenant_id=tenant_id,
+            institution_id=institution.id if institution else None,
+            name=name,
+            program_code=None,
+            degree_type=None,
+            is_active=True,
+        )
+        session.add(program)
+        session.flush()
+        return program
+
+    def _student_name_parts(self, payload: StudentCreateRequest) -> tuple[str | None, str | None]:
+        first_name = self._safe_optional_str(payload.firstName)
+        last_name = self._safe_optional_str(payload.lastName)
+        if (first_name or last_name) or not payload.name:
+            return first_name, last_name
+        parts = payload.name.strip().split()
+        if len(parts) == 1:
+            return parts[0], None
+        return " ".join(parts[:-1]), parts[-1]
+
+    def _normalize_optional_email(self, value: str | None) -> str | None:
+        email = self._safe_optional_str(value)
+        if email is None:
+            return None
+        normalized = email.lower()
+        if "@" not in normalized or "." not in normalized.rsplit("@", 1)[-1]:
+            raise ValueError("A valid email is required.")
+        return normalized
+
+    def _normalize_population(self, value: str | None) -> str:
+        normalized = self._normalize_key(value or "prospect")
+        return normalized or "prospect"
+
+    def _normalize_key(self, value: str | None) -> str:
+        return (value or "").strip().lower().replace("-", "_").replace(" ", "_")
 
     def _build_canonical_timeline(
         self,

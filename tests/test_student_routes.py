@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import get_current_tenant_context
+from app.db import get_db
 from app.api.student_routes import router
 from app.services.admissions_ops_service import AdmissionsOpsService
 from app.services.operations_service import OperationsService
@@ -19,8 +20,12 @@ def _build_test_app() -> FastAPI:
             authorization=SimpleNamespace(can=lambda permission: True),
         )
 
+    def override_get_db():
+        yield None
+
     app = FastAPI()
     app.dependency_overrides[get_current_tenant_context] = override_auth_context
+    app.dependency_overrides[get_db] = override_get_db
     app.include_router(router, prefix="/api/v1")
     return app
 
@@ -85,6 +90,76 @@ def test_list_students_passes_search_query(monkeypatch):
     assert response.status_code == 200
     assert captured["q"] == "hunter"
     assert captured["limit"] == 50
+
+
+def test_create_student_returns_created_record(monkeypatch):
+    from app.api import student_routes
+
+    captured = {}
+
+    def fake_create_student(db, tenant_id, actor_user_id, payload, authorization=None):
+        captured["payload"] = payload
+        return {
+            "id": "student-1",
+            "studentId": payload.studentId,
+            "name": "Mia Brown",
+            "preferredName": "Mia",
+            "email": payload.email,
+            "phone": payload.phone,
+            "program": {"id": "program-1", "name": payload.programInterest},
+            "degreeProgram": payload.programInterest,
+            "population": "first_time_freshman",
+            "studentType": "first_time_freshman",
+            "source": "College Board Search",
+            "sourceCategory": "direct",
+            "termInterest": payload.termInterest,
+            "institutionGoal": "KS",
+            "stage": "Prospect",
+            "risk": "Low",
+            "fitScore": 50,
+            "depositLikelihood": 50,
+            "summary": "Mia Brown added from College Board Search.",
+            "gpa": 0.0,
+            "creditsAccepted": 0,
+            "transcriptsCount": 0,
+            "advisor": "Unassigned",
+            "city": "Location pending",
+            "lastActivity": "2026-06-28T00:00:00Z",
+            "tags": ["Prospect"],
+            "nextBestAction": "Open the student record.",
+            "checklist": [],
+            "transcripts": [],
+            "termGpa": [],
+            "recommendation": {
+                "summary": "Student profile is ready for review.",
+                "fitNarrative": "No transcript evidence is available yet.",
+                "nextBestAction": "Open the student record.",
+            },
+        }
+
+    monkeypatch.setattr(student_routes.student_service, "create_student", fake_create_student)
+
+    client = TestClient(_build_test_app())
+    response = client.post(
+        "/api/v1/students",
+        json={
+            "studentId": "STU-1782676329438",
+            "firstName": "Mia",
+            "lastName": "Brown",
+            "email": "parent.brown@example.com",
+            "phone": "9135550166",
+            "population": "First-Time Freshman",
+            "programInterest": "Student Search Service",
+            "institutionGoal": "KS",
+            "stage": "Prospect",
+            "source": "College Board Search",
+            "termInterest": "Fall",
+        },
+    )
+
+    assert response.status_code == 201
+    assert captured["payload"].studentId == "STU-1782676329438"
+    assert response.json()["student"]["studentId"] == "STU-1782676329438"
 
 
 def test_get_student_returns_detail_record(monkeypatch):

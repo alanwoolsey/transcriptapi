@@ -9,6 +9,7 @@ from app.models.ops_models import ChecklistStatusUpdateRequest, StudentChecklist
 from app.models.student_models import (
     Student360DetailResponse,
     Student360ListResponse,
+    StudentCreateRequest,
     StudentInteractionCreateRequest,
     StudentInteractionCreateResponse,
     StudentInteractionUpdateRequest,
@@ -50,6 +51,25 @@ def list_students(
         limit=limit,
         offset=offset,
     )
+
+
+@router.post("", response_model=Student360DetailResponse, response_model_exclude_none=True, status_code=201)
+def create_student(
+    payload: StudentCreateRequest,
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("edit_student_profile")),
+    db: Session = Depends(get_db),
+) -> Student360DetailResponse:
+    try:
+        record = student_service.create_student(
+            db=db,
+            tenant_id=auth_context.tenant.id,
+            actor_user_id=auth_context.user.id,
+            payload=payload,
+            authorization=auth_context.authorization,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Student360DetailResponse(student=record)
 
 
 @router.get("/{student_id}", response_model=Student360DetailResponse, response_model_exclude_none=True)

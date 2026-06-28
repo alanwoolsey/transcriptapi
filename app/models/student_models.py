@@ -220,6 +220,35 @@ class Student360DetailResponse(BaseModel):
     student: Student360Record
 
 
+class StudentCreateRequest(BaseModel):
+    id: str | None = None
+    studentId: str | None = None
+    firstName: str | None = None
+    lastName: str | None = None
+    name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    population: str | None = None
+    studentType: str | None = None
+    source: str | None = None
+    sourceCategory: str | None = None
+    campaign: str | None = None
+    stage: str | None = None
+    termInterest: str | None = None
+    program: str | None = None
+    degreeProgram: str | None = None
+    programInterest: str | None = None
+    institutionGoal: str | None = None
+    owner: str | None = None
+    advisor: str | None = None
+    city: str | None = None
+    state: str | None = None
+    country: str | None = None
+    territory: str | None = None
+    sourceSchool: str | None = None
+    partnerSchool: str | None = None
+
+
 class StudentTimelineActor(BaseModel):
     id: str | None = None
     name: str
