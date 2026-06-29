@@ -781,6 +781,7 @@ resource "aws_ecs_task_definition" "service" {
         { name = "DOCUMENT_STORAGE_BUCKET", value = aws_s3_bucket.document_storage.bucket },
         { name = "UPLOAD_BATCH_MAX_WORKERS", value = tostring(var.upload_batch_max_workers) },
         { name = "EXTRACTION_SERVICE_URL", value = var.extraction_service_url },
+        { name = "GOVERNED_AI_URL", value = var.governed_ai_url },
         { name = "RUN_DB_MIGRATIONS_ON_STARTUP", value = "true" }
       ]
       secrets = [

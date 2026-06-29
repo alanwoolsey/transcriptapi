@@ -133,6 +133,12 @@ variable "extraction_service_url" {
   default     = "https://extractorservice.freedomv3.com"
 }
 
+variable "governed_ai_url" {
+  description = "Governed AI chat service base URL."
+  type        = string
+  default     = "https://6avtys8bi5.execute-api.us-east-2.amazonaws.com"
+}
+
 variable "health_check_path" {
   description = "ALB target group health check path."
   type        = string
