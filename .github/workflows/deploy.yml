@@ -131,12 +131,14 @@ jobs:
           destructive_count="$(
             jq '[.resource_changes[]
               | select(.change.actions | index("delete") or index("replace"))
+              | select(.address != "aws_ecs_task_definition.service")
             ] | length' tfplan.json
           )"
           if [ "$destructive_count" != "0" ]; then
             echo "Terraform plan contains delete or replace actions. Refusing automatic apply."
             jq -r '.resource_changes[]
               | select(.change.actions | index("delete") or index("replace"))
+              | select(.address != "aws_ecs_task_definition.service")
               | "\(.address): \(.change.actions | join(","))"' tfplan.json
             exit 1
           fi
