@@ -52,6 +52,7 @@ def get_current_tenant_context(
         claims = verifier.verify(token)
     except TokenVerificationError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+    claims = {**claims, "raw_token": token}
 
     subject = claims.get("sub")
     username = claims.get("username")

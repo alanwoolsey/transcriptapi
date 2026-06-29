@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     extraction_service_poll_interval_seconds: float = 2.0
     extraction_service_poll_timeout_seconds: float = 300.0
     extraction_service_forward_tenant_header: bool = False
+    governed_ai_url: str | None = None
+    chat_url: str | None = None
+    governed_ai_request_timeout_seconds: float = 45.0
+    assistant_context_max_chars: int = 8000
     max_upload_mb: int = 15
     upload_batch_max_workers: int = 4
     database_url: str | None = None
