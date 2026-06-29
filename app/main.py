@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse
 
+from app.api.application_routes import router as application_router
 from app.api.auth_routes import router as auth_router
 from app.api.assistant_routes import router as assistant_router
 from app.api.decision_routes import router as decision_router
@@ -64,6 +65,7 @@ def health() -> dict:
 
 
 app.include_router(auth_router)
+app.include_router(application_router, prefix="/api/v1")
 app.include_router(assistant_router, prefix="/api/v1")
 app.include_router(decision_router, prefix="/api/v1")
 app.include_router(dashboard_router, prefix="/api/v1")

@@ -293,6 +293,144 @@ Index("ix_prospect_source_refs_tenant_prospect", ProspectSourceReference.tenant_
 Index("ix_prospect_source_refs_tenant_external", ProspectSourceReference.tenant_id, ProspectSourceReference.external_reference_id)
 
 
+class Application(Base):
+    __tablename__ = "applications"
+    __table_args__ = (UniqueConstraint("tenant_id", "application_number", name="uq_applications_tenant_application_number"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    prospect_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("prospects.id", ondelete="SET NULL"))
+    application_number: Mapped[str] = mapped_column(Text, nullable=False)
+    application_type: Mapped[str] = mapped_column(Text, nullable=False)
+    student_type: Mapped[str | None] = mapped_column(Text)
+    population: Mapped[str | None] = mapped_column(Text)
+    admit_term_code: Mapped[str | None] = mapped_column(Text)
+    entry_term_code: Mapped[str | None] = mapped_column(Text)
+    program_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("programs.id", ondelete="SET NULL"))
+    campus_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("campuses.id", ondelete="SET NULL"))
+    modality: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'draft'"))
+    submitted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    decision_status: Mapped[str | None] = mapped_column(Text)
+    decision_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_applications_tenant_student", Application.tenant_id, Application.student_id)
+Index("ix_applications_tenant_status", Application.tenant_id, Application.status)
+Index("ix_applications_tenant_program_term", Application.tenant_id, Application.program_id, Application.entry_term_code)
+
+
+class ApplicationStatusHistory(Base):
+    __tablename__ = "application_status_history"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    application_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    from_status: Mapped[str | None] = mapped_column(Text)
+    to_status: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    changed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+
+
+Index("ix_application_status_history_tenant_application_changed", ApplicationStatusHistory.tenant_id, ApplicationStatusHistory.application_id, ApplicationStatusHistory.changed_at.desc())
+
+
+class AdmissionsDecision(Base):
+    __tablename__ = "admissions_decisions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    application_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    decision_packet_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("decision_packets.id", ondelete="SET NULL"))
+    decision_code: Mapped[str] = mapped_column(Text, nullable=False)
+    decision_reason: Mapped[str | None] = mapped_column(Text)
+    decided_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
+    decided_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    effective_term: Mapped[str | None] = mapped_column(Text)
+    conditions_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    letter_template_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    released_to_student_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_admissions_decisions_tenant_application", AdmissionsDecision.tenant_id, AdmissionsDecision.application_id)
+Index("ix_admissions_decisions_tenant_student_decided", AdmissionsDecision.tenant_id, AdmissionsDecision.student_id, AdmissionsDecision.decided_at.desc())
+
+
+class StudentProgramInterest(Base):
+    __tablename__ = "student_program_interests"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    program_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("programs.id", ondelete="SET NULL"))
+    program_name_raw: Mapped[str | None] = mapped_column(Text)
+    interest_rank: Mapped[int | None] = mapped_column(Integer)
+    interest_status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+
+
+Index("ix_student_program_interests_tenant_student", StudentProgramInterest.tenant_id, StudentProgramInterest.student_id)
+Index("ix_student_program_interests_tenant_program", StudentProgramInterest.tenant_id, StudentProgramInterest.program_id)
+
+
+class StudentContactMethod(Base):
+    __tablename__ = "student_contact_methods"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    contact_type: Mapped[str] = mapped_column(Text, nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    allows_sms: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    allows_email: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    opt_out: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    source: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_contact_methods_tenant_student", StudentContactMethod.tenant_id, StudentContactMethod.student_id)
+Index("ix_student_contact_methods_tenant_value", StudentContactMethod.tenant_id, StudentContactMethod.value)
+
+
+class StudentAddress(Base):
+    __tablename__ = "student_addresses"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    address_type: Mapped[str] = mapped_column(Text, nullable=False)
+    line1: Mapped[str | None] = mapped_column(Text)
+    line2: Mapped[str | None] = mapped_column(Text)
+    city: Mapped[str | None] = mapped_column(Text)
+    state: Mapped[str | None] = mapped_column(Text)
+    postal_code: Mapped[str | None] = mapped_column(Text)
+    country: Mapped[str | None] = mapped_column(Text)
+    is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    source: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_addresses_tenant_student", StudentAddress.tenant_id, StudentAddress.student_id)
+
+
 class ProspectImportSource(Base):
     __tablename__ = "prospect_import_sources"
     __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_prospect_import_sources_tenant_name"),)
@@ -845,6 +983,7 @@ class DecisionPacket(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     student_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="SET NULL"))
+    application_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("applications.id", ondelete="SET NULL"))
     transcript_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("transcripts.id", ondelete="SET NULL"))
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
     assigned_to_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="SET NULL"))
@@ -861,6 +1000,7 @@ class DecisionPacket(Base):
 
 
 Index("ix_decision_packets_tenant_created_at", DecisionPacket.tenant_id, DecisionPacket.created_at.desc())
+Index("ix_decision_packets_tenant_application_created_at", DecisionPacket.tenant_id, DecisionPacket.application_id, DecisionPacket.created_at.desc())
 Index("ix_decision_packets_tenant_student_created_at", DecisionPacket.tenant_id, DecisionPacket.student_id, DecisionPacket.created_at.desc())
 Index("ix_decision_packets_tenant_transcript_id", DecisionPacket.tenant_id, DecisionPacket.transcript_id)
 
@@ -1076,7 +1216,9 @@ class StudentChecklist(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
     student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    application_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"))
     template_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("checklist_templates.id", ondelete="RESTRICT"), nullable=False)
+    checklist_type: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'application'"))
     population: Mapped[str] = mapped_column(Text, nullable=False)
     completion_percent: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     one_item_away: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
@@ -1085,7 +1227,16 @@ class StudentChecklist(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
 
 
-Index("ix_student_checklists_tenant_student", StudentChecklist.tenant_id, StudentChecklist.student_id, unique=True)
+Index("ix_student_checklists_tenant_student", StudentChecklist.tenant_id, StudentChecklist.student_id)
+Index(
+    "uq_student_checklists_tenant_student_application_type",
+    StudentChecklist.tenant_id,
+    StudentChecklist.student_id,
+    StudentChecklist.application_id,
+    StudentChecklist.checklist_type,
+    unique=True,
+    postgresql_where=text("application_id IS NOT NULL"),
+)
 Index("ix_student_checklists_tenant_status", StudentChecklist.tenant_id, StudentChecklist.status)
 
 
@@ -1196,6 +1347,180 @@ Index(
 )
 
 
+class ApplicationDocument(Base):
+    __tablename__ = "application_documents"
+    __table_args__ = (UniqueConstraint("tenant_id", "application_id", "document_id", name="uq_application_documents_application_document"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    application_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("document_uploads.id", ondelete="CASCADE"), nullable=False)
+    document_role: Mapped[str] = mapped_column(Text, nullable=False)
+    match_status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'linked'"))
+    match_confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    linked_by: Mapped[str] = mapped_column(Text, nullable=False)
+    linked_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+
+
+Index("ix_application_documents_tenant_application", ApplicationDocument.tenant_id, ApplicationDocument.application_id)
+Index("ix_application_documents_tenant_student", ApplicationDocument.tenant_id, ApplicationDocument.student_id)
+
+
+class ApplicationReadiness(Base):
+    __tablename__ = "application_readiness"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    application_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    readiness_state: Mapped[str] = mapped_column(Text, nullable=False)
+    reason_code: Mapped[str] = mapped_column(Text, nullable=False)
+    reason_label: Mapped[str] = mapped_column(Text, nullable=False)
+    blocking_item_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    trust_blocked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    computed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    readiness_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+
+
+Index("ix_application_readiness_tenant_application", ApplicationReadiness.tenant_id, ApplicationReadiness.application_id, unique=True)
+Index("ix_application_readiness_tenant_state", ApplicationReadiness.tenant_id, ApplicationReadiness.readiness_state)
+
+
+class StudentRelationship(Base):
+    __tablename__ = "student_relationships"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    related_person_name: Mapped[str] = mapped_column(Text, nullable=False)
+    relationship_type: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str | None] = mapped_column(Text)
+    phone: Mapped[str | None] = mapped_column(Text)
+    organization: Mapped[str | None] = mapped_column(Text)
+    is_emergency_contact: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    has_proxy_access: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    ferpa_release_status: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_relationships_tenant_student", StudentRelationship.tenant_id, StudentRelationship.student_id)
+
+
+class StudentEducationHistory(Base):
+    __tablename__ = "student_education_history"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    institution_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("institutions.id", ondelete="SET NULL"))
+    institution_name: Mapped[str] = mapped_column(Text, nullable=False)
+    institution_type: Mapped[str | None] = mapped_column(Text)
+    ceeb_code: Mapped[str | None] = mapped_column(Text)
+    start_date: Mapped[date | None] = mapped_column(Date)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    graduation_date: Mapped[date | None] = mapped_column(Date)
+    degree_earned: Mapped[str | None] = mapped_column(Text)
+    gpa_self_reported: Mapped[float | None] = mapped_column(Numeric(5, 3))
+    transcript_required: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    transcript_received: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    transcript_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("transcripts.id", ondelete="SET NULL"))
+    source: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_education_history_tenant_student", StudentEducationHistory.tenant_id, StudentEducationHistory.student_id)
+Index("ix_student_education_history_tenant_institution", StudentEducationHistory.tenant_id, StudentEducationHistory.institution_id)
+
+
+class StudentTestScore(Base):
+    __tablename__ = "student_test_scores"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    test_type: Mapped[str] = mapped_column(Text, nullable=False)
+    test_date: Mapped[date | None] = mapped_column(Date)
+    score_name: Mapped[str] = mapped_column(Text, nullable=False)
+    score_value: Mapped[str] = mapped_column(Text, nullable=False)
+    percentile: Mapped[int | None] = mapped_column(Integer)
+    source: Mapped[str | None] = mapped_column(Text)
+    official_status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'unknown'"))
+    document_upload_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("document_uploads.id", ondelete="SET NULL"))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_test_scores_tenant_student", StudentTestScore.tenant_id, StudentTestScore.student_id)
+Index("ix_student_test_scores_tenant_type", StudentTestScore.tenant_id, StudentTestScore.test_type)
+
+
+class StudentDeposit(Base):
+    __tablename__ = "student_deposits"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    application_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("applications.id", ondelete="SET NULL"))
+    amount: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    paid_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    waived: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_deposits_tenant_student", StudentDeposit.tenant_id, StudentDeposit.student_id)
+Index("ix_student_deposits_tenant_application", StudentDeposit.tenant_id, StudentDeposit.application_id)
+
+
+class StudentScholarship(Base):
+    __tablename__ = "student_scholarships"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    application_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("applications.id", ondelete="SET NULL"))
+    scholarship_name: Mapped[str] = mapped_column(Text, nullable=False)
+    amount: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_scholarships_tenant_student", StudentScholarship.tenant_id, StudentScholarship.student_id)
+Index("ix_student_scholarships_tenant_application", StudentScholarship.tenant_id, StudentScholarship.application_id)
+
+
+class StudentFinancialAidStatus(Base):
+    __tablename__ = "student_financial_aid_status"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    application_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("applications.id", ondelete="SET NULL"))
+    fafsa_status: Mapped[str | None] = mapped_column(Text)
+    verification_status: Mapped[str | None] = mapped_column(Text)
+    award_status: Mapped[str | None] = mapped_column(Text)
+    affordability_risk: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_financial_aid_status_tenant_student", StudentFinancialAidStatus.tenant_id, StudentFinancialAidStatus.student_id)
+Index("ix_student_financial_aid_status_tenant_application", StudentFinancialAidStatus.tenant_id, StudentFinancialAidStatus.application_id)
+
+
 class DuplicateCandidate(Base):
     __tablename__ = "duplicate_candidates"
 
@@ -1272,6 +1597,341 @@ class StudentMeltScore(Base):
 
 
 Index("ix_student_melt_scores_tenant_student", StudentMeltScore.tenant_id, StudentMeltScore.student_id, unique=True)
+
+
+class SisConnection(Base):
+    __tablename__ = "sis_connections"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    sis_system: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
+    config_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_sis_connections_tenant_system", SisConnection.tenant_id, SisConnection.sis_system)
+
+
+class SisFieldMapping(Base):
+    __tablename__ = "sis_field_mappings"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    sis_system: Mapped[str] = mapped_column(Text, nullable=False)
+    source_entity: Mapped[str] = mapped_column(Text, nullable=False)
+    source_field: Mapped[str] = mapped_column(Text, nullable=False)
+    target_entity: Mapped[str] = mapped_column(Text, nullable=False)
+    target_field: Mapped[str] = mapped_column(Text, nullable=False)
+    transform_rule_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_sis_field_mappings_tenant_system_source", SisFieldMapping.tenant_id, SisFieldMapping.sis_system, SisFieldMapping.source_entity)
+
+
+class SisExport(Base):
+    __tablename__ = "sis_exports"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    application_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("applications.id", ondelete="SET NULL"))
+    sis_system: Mapped[str] = mapped_column(Text, nullable=False)
+    export_type: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'queued'"))
+    payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    response_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    external_person_id: Mapped[str | None] = mapped_column(Text)
+    external_application_id: Mapped[str | None] = mapped_column(Text)
+    attempted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_sis_exports_tenant_student_created", SisExport.tenant_id, SisExport.student_id, SisExport.created_at.desc())
+Index("ix_sis_exports_tenant_application", SisExport.tenant_id, SisExport.application_id)
+Index("ix_sis_exports_tenant_status", SisExport.tenant_id, SisExport.status)
+
+
+class SisExportEvent(Base):
+    __tablename__ = "sis_export_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    sis_export_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sis_exports.id", ondelete="CASCADE"), nullable=False)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str | None] = mapped_column(Text)
+    message: Mapped[str | None] = mapped_column(Text)
+    payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    occurred_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_sis_export_events_tenant_export", SisExportEvent.tenant_id, SisExportEvent.sis_export_id, SisExportEvent.occurred_at.desc())
+
+
+class ExternalSystemIdentifier(Base):
+    __tablename__ = "external_system_identifiers"
+    __table_args__ = (UniqueConstraint("tenant_id", "system_name", "entity_type", "entity_id", name="uq_external_identifiers_entity"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    system_name: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_type: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    external_id: Mapped[str] = mapped_column(Text, nullable=False)
+    external_id_type: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_external_identifiers_tenant_external", ExternalSystemIdentifier.tenant_id, ExternalSystemIdentifier.system_name, ExternalSystemIdentifier.external_id)
+
+
+class Team(Base):
+    __tablename__ = "teams"
+    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_teams_tenant_name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    team_type: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_teams_tenant_type", Team.tenant_id, Team.team_type)
+
+
+class TeamMembership(Base):
+    __tablename__ = "team_memberships"
+    __table_args__ = (UniqueConstraint("tenant_id", "team_id", "user_id", name="uq_team_memberships_team_user"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("app_users.id", ondelete="CASCADE"), nullable=False)
+    role: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_team_memberships_tenant_user", TeamMembership.tenant_id, TeamMembership.user_id)
+
+
+class StudentScoreHistory(Base):
+    __tablename__ = "student_score_history"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    application_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("applications.id", ondelete="SET NULL"))
+    score_type: Mapped[str] = mapped_column(Text, nullable=False)
+    score_value: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(Text)
+    reason_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    computed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_score_history_tenant_student_type", StudentScoreHistory.tenant_id, StudentScoreHistory.student_id, StudentScoreHistory.score_type, StudentScoreHistory.computed_at.desc())
+
+
+class StudentProfileFact(Base):
+    __tablename__ = "student_profile_facts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    field_name: Mapped[str] = mapped_column(Text, nullable=False)
+    field_value: Mapped[str | None] = mapped_column(Text)
+    source_type: Mapped[str] = mapped_column(Text, nullable=False)
+    source_id: Mapped[str | None] = mapped_column(Text)
+    confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    verified: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    effective_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_profile_facts_tenant_student_field", StudentProfileFact.tenant_id, StudentProfileFact.student_id, StudentProfileFact.field_name)
+
+
+class ReferenceTerm(Base):
+    __tablename__ = "terms"
+    __table_args__ = (UniqueConstraint("tenant_id", "term_code", name="uq_terms_tenant_code"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    term_code: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    start_date: Mapped[date | None] = mapped_column(Date)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class Campus(Base):
+    __tablename__ = "campuses"
+    __table_args__ = (UniqueConstraint("tenant_id", "campus_code", name="uq_campuses_tenant_code"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    campus_code: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class ReferenceValue(Base):
+    __tablename__ = "reference_values"
+    __table_args__ = (UniqueConstraint("tenant_id", "category", "code", name="uq_reference_values_tenant_category_code"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    category: Mapped[str] = mapped_column(Text, nullable=False)
+    code: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_reference_values_tenant_category", ReferenceValue.tenant_id, ReferenceValue.category, ReferenceValue.active)
+
+
+class CommunicationTemplate(Base):
+    __tablename__ = "communication_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    channel: Mapped[str] = mapped_column(Text, nullable=False)
+    subject: Mapped[str | None] = mapped_column(Text)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_communication_templates_tenant_channel", CommunicationTemplate.tenant_id, CommunicationTemplate.channel)
+
+
+class CommunicationMessage(Base):
+    __tablename__ = "communication_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    application_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("applications.id", ondelete="SET NULL"))
+    template_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("communication_templates.id", ondelete="SET NULL"))
+    channel: Mapped[str] = mapped_column(Text, nullable=False)
+    direction: Mapped[str] = mapped_column(Text, nullable=False)
+    subject: Mapped[str | None] = mapped_column(Text)
+    body: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_message_id: Mapped[str | None] = mapped_column(Text)
+    sent_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+
+
+Index("ix_communication_messages_tenant_student", CommunicationMessage.tenant_id, CommunicationMessage.student_id, CommunicationMessage.created_at.desc())
+Index("ix_communication_messages_tenant_application", CommunicationMessage.tenant_id, CommunicationMessage.application_id)
+
+
+class CommunicationEvent(Base):
+    __tablename__ = "communication_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    message_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("communication_messages.id", ondelete="CASCADE"), nullable=False)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    occurred_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_communication_events_tenant_message", CommunicationEvent.tenant_id, CommunicationEvent.message_id, CommunicationEvent.occurred_at.desc())
+
+
+class StudentCommunicationPreference(Base):
+    __tablename__ = "student_communication_preferences"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    channel: Mapped[str] = mapped_column(Text, nullable=False)
+    opted_in: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    preference_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_student_communication_preferences_tenant_student", StudentCommunicationPreference.tenant_id, StudentCommunicationPreference.student_id)
+
+
+class FormSubmission(Base):
+    __tablename__ = "form_submissions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    student_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("students.id", ondelete="SET NULL"))
+    external_form_id: Mapped[str | None] = mapped_column(Text)
+    form_name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    submitted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_form_submissions_tenant_student", FormSubmission.tenant_id, FormSubmission.student_id)
+
+
+class FormSubmissionAnswer(Base):
+    __tablename__ = "form_submission_answers"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    form_submission_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("form_submissions.id", ondelete="CASCADE"), nullable=False)
+    question_key: Mapped[str] = mapped_column(Text, nullable=False)
+    question_label: Mapped[str | None] = mapped_column(Text)
+    answer_value: Mapped[str | None] = mapped_column(Text)
+    answer_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_form_submission_answers_tenant_submission", FormSubmissionAnswer.tenant_id, FormSubmissionAnswer.form_submission_id)
+
+
+class ApplicationFormSubmission(Base):
+    __tablename__ = "application_form_submissions"
+    __table_args__ = (UniqueConstraint("tenant_id", "application_id", "form_submission_id", name="uq_application_form_submissions_application_form"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    application_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    form_submission_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("form_submissions.id", ondelete="CASCADE"), nullable=False)
+    link_type: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'application'"))
+    linked_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+
+
+Index("ix_application_form_submissions_tenant_application", ApplicationFormSubmission.tenant_id, ApplicationFormSubmission.application_id)
 
 
 class AuditEvent(Base):

@@ -1,0 +1,48 @@
+{
+  "jobs": {
+    "eaee9c67-7e26-4ef5-b92f-4bf5dbb35c5d": [
+      {
+        "actionMode": "Add new and update existing",
+        "actorUserId": "ae4d78b3-bbe9-4c8f-afbc-cbb239a86c8e",
+        "completedAt": null,
+        "createdAt": "2026-06-29T23:21:01.026338+00:00",
+        "documentId": null,
+        "fileName": "prospects.csv",
+        "id": "import-29dbc396-8116-4d39-8fca-74a3dbc051dc",
+        "importType": "Students / Prospects",
+        "mappings": [],
+        "rows": [],
+        "settings": {},
+        "status": "draft",
+        "summary": {},
+        "templateName": null,
+        "tenantId": "eaee9c67-7e26-4ef5-b92f-4bf5dbb35c5d",
+        "updatedAt": "2026-06-29T23:21:01.026338+00:00"
+      }
+    ]
+  },
+  "templates": {
+    "9e50c2ec-c76f-4af3-94ea-38ce09f40ce6": [
+      {
+        "actorUserId": "e6add22d-1633-4303-a02e-e311362d2f4a",
+        "createdAt": "2026-06-29T23:21:01.051220+00:00",
+        "id": "template-807e3290-8ead-4605-9ac7-9bba1d4a6740",
+        "importType": "Students / Prospects",
+        "mappings": [
+          {
+            "source": "Email",
+            "target": "email"
+          }
+        ],
+        "matchingStrategy": [],
+        "name": "Manual Inquiry Upload",
+        "source": "Manual Inquiry Upload",
+        "tenantId": "9e50c2ec-c76f-4af3-94ea-38ce09f40ce6",
+        "transformRules": [],
+        "updateBehavior": "Do not overwrite existing values",
+        "updatedAt": "2026-06-29T23:21:01.051220+00:00",
+        "validationRules": []
+      }
+    ]
+  }
+}
