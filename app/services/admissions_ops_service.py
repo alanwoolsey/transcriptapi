@@ -317,7 +317,25 @@ class AdmissionsOpsService:
             return WorkTodayBoardResponse(groups=groups, total=len(rows) + len(prospect_items))
 
     def get_counselor_today_work(self, tenant_id: UUID, *, limit: int = 100) -> WorkCounselorTodayResponse:
-        today = self.get_today_work(tenant_id, limit=limit)
+        self.work_state_projector.ensure_tenant_projection(tenant_id)
+        session_factory = self.session_factory()
+        with session_factory() as session:
+            rows, agent_state_by_student, run_by_id = self._load_today_work_context(
+                session,
+                tenant_id,
+                include_backlog=True,
+            )
+            items = [
+                self._build_today_work_item(
+                    row,
+                    agent_state_by_student.get(row.student_id),
+                    run_by_id,
+                )
+                for row in rows[:limit]
+            ]
+            prospect_items = self.prospect_service.get_today_work_items(tenant_id, limit=limit)
+            items = [*prospect_items, *items][:limit]
+            session.commit()
         bucket_defs = [
             ("overdue_follow_up", "overdue follow-up", "Follow-up date has passed."),
             ("inquiry", "Inquiry", "Inquiry needs counselor follow-up."),
@@ -333,7 +351,7 @@ class AdmissionsOpsService:
             ("recruitment_follow_up", "recruitment follow-up", "Recruitment event or territory follow-up is due."),
         ]
         items_by_key: dict[str, list[WorkTodayItemResponse]] = {key: [] for key, *_ in bucket_defs}
-        for item in today.items:
+        for item in items:
             status = canonical_pipeline_status(item.pipelineStatus or item.stage)
             key = status.lower().replace("/", "_").replace(" ", "_")
             if item.nextFollowUpAt and self._parse_iso_datetime(item.nextFollowUpAt) and self._parse_iso_datetime(item.nextFollowUpAt) < datetime.now(timezone.utc):
@@ -1520,6 +1538,7 @@ class AdmissionsOpsService:
         priority: str | None = None,
         aging_bucket: str | None = None,
         q: str | None = None,
+        include_backlog: bool = False,
     ) -> tuple[list[StudentWorkState], dict[UUID, StudentAgentState], dict[UUID, AgentRun]]:
         stmt = self._projected_work_items_query(
             tenant_id,
@@ -1530,7 +1549,7 @@ class AdmissionsOpsService:
             aging_bucket=aging_bucket,
             q=q,
         )
-        if priority is None:
+        if priority is None and not include_backlog:
             stmt = stmt.where(StudentWorkState.priority.in_(["urgent", "today"]))
         rows = session.execute(
             stmt.order_by(
