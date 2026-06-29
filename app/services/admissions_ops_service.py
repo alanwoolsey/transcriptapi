@@ -1084,11 +1084,6 @@ class AdmissionsOpsService:
             readiness.readiness_state = "blocked_by_document"
             readiness.reason_code = blocking_item.status
             readiness.reason_label = f"{blocking_item.label} is {blocking_item.status.replace('_', ' ')}."
-        elif review_items:
-            blocking_item = review_items[0]
-            readiness.readiness_state = "ready_for_review"
-            readiness.reason_code = blocking_item.code
-            readiness.reason_label = f"{blocking_item.label} requires staff review"
         elif checklist.one_item_away and missing_items:
             blocking_item = missing_items[0]
             readiness.readiness_state = "nearly_complete"
@@ -1099,6 +1094,11 @@ class AdmissionsOpsService:
             readiness.readiness_state = "incomplete"
             readiness.reason_code = "incomplete"
             readiness.reason_label = f"{blocking_item.label} is still missing."
+        elif review_items:
+            blocking_item = review_items[0]
+            readiness.readiness_state = "ready_for_review"
+            readiness.reason_code = blocking_item.code
+            readiness.reason_label = f"{blocking_item.label} requires staff review"
         else:
             readiness.readiness_state = "ready_for_decision"
             readiness.reason_code = "ready_for_decision"
