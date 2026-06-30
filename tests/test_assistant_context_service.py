@@ -14,9 +14,10 @@ def _auth_context():
         authorization=SimpleNamespace(
             base_role="tenant_admin",
             roles={"tenant_admin"},
-            permissions={"view_student_360"},
+            permissions={"view_student_360", "admin_users_delete", "admin_users_deactivate"},
             sensitivity_tiers=set(),
             can=lambda permission: permission == "view_student_360",
+            can_access_tier=lambda tier: False,
         ),
     )
 
@@ -74,6 +75,8 @@ def test_context_service_retrieves_compact_current_student_context(monkeypatch):
     assert "ANSWER_FOCUS_JSON" in captured["payload"]["message"]
     assert "APP_CONTEXT_JSON" in captured["payload"]["message"]
     assert "High school transcript" in captured["payload"]["message"]
+    assert "admin_users_delete" not in captured["payload"]["message"]
+    assert "admin_users_deactivate" not in captured["payload"]["message"]
     assert response.auditId == "audit-1"
 
 

@@ -137,8 +137,7 @@ class AssistantContextService:
                 "displayName": auth_context.user.display_name,
                 "baseRole": auth_context.authorization.base_role,
                 "roles": sorted(auth_context.authorization.roles),
-                "permissions": sorted(auth_context.authorization.permissions),
-                "sensitivityTiers": sorted(auth_context.authorization.sensitivity_tiers),
+                "capabilities": self.assistant_capabilities(auth_context),
             },
             "route": payload.route,
             "intent": {"name": plan.intent, "confidence": plan.confidence},
@@ -239,6 +238,26 @@ class AssistantContextService:
                 "userId": str(auth_context.user.id),
             },
             **({"attachments": [attachment.model_dump() for attachment in payload.attachments]} if payload.attachments else {}),
+        }
+
+    @staticmethod
+    def assistant_capabilities(auth_context: AuthenticatedTenantContext) -> dict[str, Any]:
+        authorization = auth_context.authorization
+        return {
+            "canViewStudents": authorization.can("view_student_360"),
+            "canViewChecklists": authorization.can("view_checklist") or authorization.can("view_student_360"),
+            "canEditChecklists": authorization.can("edit_checklist"),
+            "canViewDocuments": authorization.can("view_document_metadata"),
+            "canUploadDocuments": authorization.can("upload_documents"),
+            "canViewDecisions": authorization.can("view_decision_packet"),
+            "canViewDashboards": authorization.can("view_dashboards"),
+            "canViewTrustFlags": authorization.can("view_trust_flags"),
+            "sensitivityAccess": {
+                "basicProfile": authorization.can_access_tier("basic_profile"),
+                "academicRecord": authorization.can_access_tier("academic_record"),
+                "notes": authorization.can_access_tier("notes"),
+                "releasedDecisions": authorization.can_access_tier("released_decisions"),
+            },
         }
 
     def call_governed_ai(self, governed_payload: dict[str, Any], auth_context: AuthenticatedTenantContext) -> dict[str, Any]:
