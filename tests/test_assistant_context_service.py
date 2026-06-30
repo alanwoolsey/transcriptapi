@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from app.models.assistant_models import AssistantActiveEntity, AssistantChatRequest, AssistantDocumentClassificationRequest
+from app.core.config import settings
 from app.services.assistant_context_service import AssistantContextService
 
 
@@ -104,3 +105,41 @@ def test_context_service_classifies_document_with_governed_ai(monkeypatch):
     assert response.documentType == "Government ID / residency proof"
     assert response.confidence == 0.94
     assert captured["payload"]["attachments"][0]["fileName"] == "dl example.jpeg"
+
+
+def test_call_governed_ai_forwards_auth_and_tenant_headers(monkeypatch):
+    service = AssistantContextService(student_service=SimpleNamespace(), admissions_ops_service=SimpleNamespace())
+    auth_context = _auth_context()
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"response": "ok"}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json, headers):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr("app.services.assistant_context_service.httpx.Client", FakeClient)
+    monkeypatch.setattr(settings, "governed_ai_url", "https://governed.example.com")
+
+    response = service.call_governed_ai({"message": "hello"}, auth_context)
+
+    assert response == {"response": "ok"}
+    assert captured["url"] == "https://governed.example.com/api/agent/run"
+    assert captured["headers"]["Authorization"] == "Bearer token"
+    assert captured["headers"]["X-Tenant-Id"] == str(auth_context.tenant.id)

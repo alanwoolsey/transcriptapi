@@ -2,6 +2,7 @@ from functools import lru_cache
 from typing import Any
 
 import jwt
+from jwt import ExpiredSignatureError
 from jwt import PyJWKClient
 
 from app.core.config import settings
@@ -35,6 +36,8 @@ class CognitoAccessTokenVerifier:
                 leeway=settings.cognito_clock_skew_seconds,
                 options={"require": ["exp", "iat", "iss", "token_use"]},
             )
+        except ExpiredSignatureError as exc:
+            raise TokenVerificationError("Access token expired.") from exc
         except Exception as exc:
             raise TokenVerificationError("Invalid access token.") from exc
 

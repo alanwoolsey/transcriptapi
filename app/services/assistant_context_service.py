@@ -234,10 +234,13 @@ class AssistantContextService:
                 "citations": [],
             }
         with httpx.Client(timeout=settings.governed_ai_request_timeout_seconds) as client:
+            headers = {"X-Tenant-Id": str(auth_context.tenant.id)}
+            if auth_context.claims.get("raw_token"):
+                headers["Authorization"] = f"Bearer {auth_context.claims['raw_token']}"
             response = client.post(
                 f"{base_url}/api/agent/run",
                 json=governed_payload,
-                headers={"Authorization": f"Bearer {auth_context.claims.get('raw_token', '')}"} if auth_context.claims.get("raw_token") else {},
+                headers=headers,
             )
         try:
             payload = response.json()
