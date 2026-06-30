@@ -5,6 +5,7 @@ from app.models.assistant_models import AssistantChatRequest, AssistantChatRespo
 from app.services.assistant_context_service import assistant_context_service
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
+agent_compat_router = APIRouter(prefix="/agent", tags=["assistant"])
 
 
 @router.post("/chat", response_model=AssistantChatResponse)
@@ -21,3 +22,11 @@ def governed_document_classification(
     auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
 ) -> AssistantDocumentClassificationResponse:
     return assistant_context_service.classify_document(payload, auth_context)
+
+
+@agent_compat_router.post("/run", response_model=AssistantChatResponse)
+def governed_agent_run_compat(
+    payload: AssistantChatRequest,
+    auth_context: AuthenticatedTenantContext = Depends(get_current_tenant_context),
+) -> AssistantChatResponse:
+    return assistant_context_service.run_chat(payload, auth_context)

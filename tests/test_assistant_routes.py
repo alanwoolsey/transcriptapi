@@ -4,7 +4,7 @@ from uuid import uuid4
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.assistant_routes import router
+from app.api.assistant_routes import agent_compat_router, router
 from app.api.dependencies import get_current_tenant_context
 
 
@@ -29,6 +29,7 @@ def _build_test_app(can_view_student=True):
     app = FastAPI()
     app.dependency_overrides[get_current_tenant_context] = override_auth_context
     app.include_router(router, prefix="/api/v1")
+    app.include_router(agent_compat_router, prefix="/api")
     return app
 
 
@@ -77,6 +78,39 @@ def test_assistant_chat_requires_authenticated_tenant_context():
     response = client.post("/api/v1/assistant/chat", json={"message": "hello"})
 
     assert response.status_code in {400, 401, 403}
+
+
+def test_agent_run_compat_route_uses_context_broker(monkeypatch):
+    from app.api import assistant_routes
+
+    captured = {}
+
+    def fake_run_chat(payload, auth_context):
+        captured["message"] = payload.message
+        return {
+            "response": "Start with today's urgent work.",
+            "policyStatus": "allowed",
+            "guardrails": [],
+            "citations": [],
+            "auditId": "audit-compat",
+            "retrieval": {
+                "intent": "counselor_next_best_action",
+                "confidence": 0.88,
+                "toolsUsed": ["get_counselor_today_work"],
+                "inputContextTokens": 250,
+                "cacheHit": False,
+                "sources": ["work:counselor_today"],
+            },
+        }
+
+    monkeypatch.setattr(assistant_routes.assistant_context_service, "run_chat", fake_run_chat)
+    client = TestClient(_build_test_app())
+
+    response = client.post("/api/agent/run", json={"message": "what should I do next"})
+
+    assert response.status_code == 200
+    assert response.json()["auditId"] == "audit-compat"
+    assert captured["message"] == "what should I do next"
 
 
 def test_assistant_classify_document_route(monkeypatch):

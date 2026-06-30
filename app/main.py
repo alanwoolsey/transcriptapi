@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.application_routes import router as application_router
 from app.api.auth_routes import router as auth_router
-from app.api.assistant_routes import router as assistant_router
+from app.api.assistant_routes import agent_compat_router, router as assistant_router
 from app.api.decision_routes import router as decision_router
 from app.api.dashboard_routes import router as dashboard_router
 from app.api.document_routes import router as document_router
@@ -67,6 +67,7 @@ def health() -> dict:
 app.include_router(auth_router)
 app.include_router(application_router, prefix="/api/v1")
 app.include_router(assistant_router, prefix="/api/v1")
+app.include_router(agent_compat_router, prefix="/api")
 app.include_router(decision_router, prefix="/api/v1")
 app.include_router(dashboard_router, prefix="/api/v1")
 app.include_router(document_router, prefix="/api/v1")

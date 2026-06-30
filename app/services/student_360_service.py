@@ -6,7 +6,7 @@ from typing import Any
 from uuid import UUID
 
 import httpx
-from sqlalchemy import Select, String, cast, func, or_, select
+from sqlalchemy import Select, String, cast, func, inspect, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from app.core.config import settings
@@ -903,7 +903,11 @@ class Student360Service:
             prospect.updated_at = now
 
         sms_opt_in = bool(data.get("smsOptIn") or data.get("textingOk") or data.get("textConsent"))
-        if "phone" in data and student.phone:
+        contact_methods_available = self._table_available(db, "student_contact_methods")
+        addresses_available = self._table_available(db, "student_addresses")
+        relationships_available = self._table_available(db, "student_relationships")
+
+        if contact_methods_available and "phone" in data and student.phone:
             contact = db.execute(
                 select(StudentContactMethod)
                 .where(
@@ -930,7 +934,7 @@ class Student360Service:
                 contact.value = student.phone
                 contact.allows_sms = sms_opt_in
                 contact.updated_at = now
-        elif any(key in data for key in ("smsOptIn", "textingOk", "textConsent")):
+        elif contact_methods_available and any(key in data for key in ("smsOptIn", "textingOk", "textConsent")):
             contact = db.execute(
                 select(StudentContactMethod)
                 .where(
@@ -945,7 +949,7 @@ class Student360Service:
                 contact.allows_sms = sms_opt_in
                 contact.updated_at = now
 
-        if any(key in data for key in ("addressLine1", "addressLine2", "city", "state", "postalCode")):
+        if addresses_available and any(key in data for key in ("addressLine1", "addressLine2", "city", "state", "postalCode")):
             address = db.execute(
                 select(StudentAddress)
                 .where(
@@ -972,7 +976,7 @@ class Student360Service:
             address.country = address.country or "US"
             address.updated_at = now
 
-        if any(key in data for key in ("parentName", "parentRelationship", "parentEmail", "parentPhone")):
+        if relationships_available and any(key in data for key in ("parentName", "parentRelationship", "parentEmail", "parentPhone")):
             parent_name = self._safe_optional_str(data.get("parentName"))
             relationship = self._safe_optional_str(data.get("parentRelationship")) or "Parent/guardian"
             relationship_row = db.execute(
@@ -1028,6 +1032,13 @@ class Student360Service:
         )
         db.commit()
         return self.get_student(tenant_id=tenant_id, student_id=str(student.id), authorization=authorization)
+
+    @staticmethod
+    def _table_available(db: Session, table_name: str) -> bool:
+        bind = db.get_bind()
+        if bind is None:
+            return False
+        return inspect(bind).has_table(table_name)
 
     def record_next_action(self, db: Session, tenant_id: UUID, actor_user_id: UUID, student_id: str, payload: Any) -> dict[str, str | None]:
         action_type = (payload.actionType or "").strip().lower()
