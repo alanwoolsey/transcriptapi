@@ -48,6 +48,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.terraform == 'true'
     runs-on: ubuntu-latest
+    env:
+      TF_VAR_twilio_account_sid: ${{ secrets.TWILIO_ACCOUNT_SID }}
+      TF_VAR_twilio_auth_token: ${{ secrets.TWILIO_AUTH_TOKEN }}
+      TF_VAR_twilio_messaging_service_sid: ${{ secrets.TWILIO_MESSAGING_SERVICE_SID }}
+      TF_VAR_twilio_from_number: ${{ secrets.TWILIO_FROM_NUMBER }}
     steps:
       - uses: actions/checkout@v4
 

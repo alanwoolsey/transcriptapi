@@ -139,6 +139,31 @@ variable "governed_ai_url" {
   default     = "https://6avtys8bi5.execute-api.us-east-2.amazonaws.com"
 }
 
+variable "twilio_account_sid" {
+  description = "Twilio Account SID used for outbound SMS."
+  type        = string
+  default     = ""
+}
+
+variable "twilio_auth_token" {
+  description = "Twilio Auth Token used for outbound SMS."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "twilio_messaging_service_sid" {
+  description = "Twilio Messaging Service SID. Preferred over twilio_from_number when set."
+  type        = string
+  default     = ""
+}
+
+variable "twilio_from_number" {
+  description = "Fallback Twilio sender phone number in E.164 format, for example +15551234567."
+  type        = string
+  default     = ""
+}
+
 variable "health_check_path" {
   description = "ALB target group health check path."
   type        = string

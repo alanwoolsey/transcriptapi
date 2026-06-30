@@ -36,6 +36,7 @@ locals {
   alb_name                 = trimsuffix(substr("${local.name_prefix}-alb", 0, 32), "-")
   target_group_name        = trimsuffix(substr("${local.name_prefix}-tg", 0, 32), "-")
   db_secret_name           = "${local.name_prefix}/database"
+  twilio_auth_secret_name  = "${local.name_prefix}/twilio-auth-token"
   active_db_host           = var.db_enable_local_access ? aws_db_instance.postgres_public[0].address : aws_db_instance.postgres.address
   active_db_port           = var.db_enable_local_access ? aws_db_instance.postgres_public[0].port : aws_db_instance.postgres.port
   active_db_name           = var.db_enable_local_access ? aws_db_instance.postgres_public[0].db_name : aws_db_instance.postgres.db_name
@@ -442,6 +443,17 @@ resource "aws_secretsmanager_secret_version" "database" {
   })
 }
 
+resource "aws_secretsmanager_secret" "twilio_auth_token" {
+  name = local.twilio_auth_secret_name
+
+  tags = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "twilio_auth_token" {
+  secret_id     = aws_secretsmanager_secret.twilio_auth_token.id
+  secret_string = var.twilio_auth_token
+}
+
 resource "aws_cloudwatch_log_group" "service" {
   name              = "/ecs/${local.name_prefix}"
   retention_in_days = var.log_retention_days
@@ -556,7 +568,8 @@ resource "aws_iam_role_policy" "task_execution_secrets" {
           "secretsmanager:GetSecretValue"
         ]
         Resource = [
-          aws_secretsmanager_secret.database.arn
+          aws_secretsmanager_secret.database.arn,
+          aws_secretsmanager_secret.twilio_auth_token.arn
         ]
       }
     ]
@@ -782,12 +795,19 @@ resource "aws_ecs_task_definition" "service" {
         { name = "UPLOAD_BATCH_MAX_WORKERS", value = tostring(var.upload_batch_max_workers) },
         { name = "EXTRACTION_SERVICE_URL", value = var.extraction_service_url },
         { name = "GOVERNED_AI_URL", value = var.governed_ai_url },
+        { name = "TWILIO_ACCOUNT_SID", value = var.twilio_account_sid },
+        { name = "TWILIO_MESSAGING_SERVICE_SID", value = var.twilio_messaging_service_sid },
+        { name = "TWILIO_FROM_NUMBER", value = var.twilio_from_number },
         { name = "RUN_DB_MIGRATIONS_ON_STARTUP", value = "true" }
       ]
       secrets = [
         {
           name      = "DATABASE_SECRET_JSON"
           valueFrom = aws_secretsmanager_secret.database.arn
+        },
+        {
+          name      = "TWILIO_AUTH_TOKEN"
+          valueFrom = aws_secretsmanager_secret.twilio_auth_token.arn
         }
       ]
       logConfiguration = {
