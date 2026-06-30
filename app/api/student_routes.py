@@ -17,7 +17,6 @@ from app.models.student_models import (
     StudentNextActionRequest,
     StudentNextActionResponse,
     StudentProgramUpdateRequest,
-    StudentProgramUpdateResponse,
     StudentTimelineResponse,
 )
 from app.services.admissions_ops_service import AdmissionsOpsNotFoundError, AdmissionsOpsService, AdmissionsOpsValidationError
@@ -87,22 +86,23 @@ def get_student(
     return Student360DetailResponse(student=record)
 
 
-@router.patch("/{student_id}", response_model=StudentProgramUpdateResponse)
+@router.patch("/{student_id}", response_model=Student360DetailResponse, response_model_exclude_none=True)
 def update_student(
     student_id: str,
     payload: StudentProgramUpdateRequest,
     auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
     db: Session = Depends(get_db),
-) -> StudentProgramUpdateResponse:
+) -> Student360DetailResponse:
     try:
-        program_name = payload.degreeProgram or payload.program
-        return student_service.update_student_program(
+        record = student_service.update_student(
             db=db,
             tenant_id=auth_context.tenant.id,
             actor_user_id=auth_context.user.id,
             student_id=student_id,
-            program_name=program_name,
+            payload=payload,
+            authorization=auth_context.authorization,
         )
+        return Student360DetailResponse(student=record)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -197,6 +197,27 @@ def log_student_communication(
 ) -> dict[str, Any]:
     try:
         return student_service.log_student_communication(
+            db=db,
+            tenant_id=auth_context.tenant.id,
+            actor_user_id=auth_context.user.id,
+            student_id=student_id,
+            payload=payload,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/{student_id}/communications/send")
+def send_student_communication(
+    student_id: str,
+    payload: dict[str, Any],
+    auth_context: AuthenticatedTenantContext = Depends(require_permission("view_student_360")),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return student_service.send_student_communication(
             db=db,
             tenant_id=auth_context.tenant.id,
             actor_user_id=auth_context.user.id,

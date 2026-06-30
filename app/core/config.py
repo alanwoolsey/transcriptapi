@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     database_user: str | None = None
     database_password: str | None = None
     run_db_migrations_on_startup: bool = False
+    twilio_account_sid: str | None = None
+    twilio_auth_token: str | None = None
+    twilio_messaging_service_sid: str | None = None
+    twilio_from_number: str | None = None
+    twilio_request_timeout_seconds: float = 15.0
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

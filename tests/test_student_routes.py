@@ -340,37 +340,66 @@ def test_student_360_scholarship_helpers_normalize_state_payload():
     assert aid.scholarshipAmount == 6500.5
 
 
-def test_patch_student_updates_program(monkeypatch):
+def test_patch_student_updates_profile(monkeypatch):
     from app.api import student_routes
 
     captured = {}
 
-    def fake_update_program(db, tenant_id, actor_user_id, student_id, program_name):
+    def fake_update_student(db, tenant_id, actor_user_id, student_id, payload, authorization=None):
         captured["student_id"] = student_id
-        captured["program_name"] = program_name
+        captured["program_name"] = payload.program
+        captured["phone"] = payload.phone
         captured["actor_user_id"] = actor_user_id
+        captured["authorization"] = authorization
         return {
             "id": "STU-123",
-            "program": program_name,
-            "degreeProgram": program_name,
+            "studentId": "STU-123",
+            "name": "Mia Brown",
+            "preferredName": "Mia",
+            "email": "mia@example.edu",
+            "phone": payload.phone,
+            "program": payload.program,
+            "degreeProgram": payload.program,
+            "institutionGoal": "KS",
             "stage": "Applicant",
+            "risk": "Low",
+            "advisor": "Unassigned",
+            "city": "Keene, TX",
+            "fitScore": 86,
+            "depositLikelihood": 61,
+            "summary": "Student record.",
+            "gpa": 0,
+            "creditsAccepted": 0,
+            "transcriptsCount": 0,
+            "lastActivity": "Just now",
+            "tags": [],
+            "nextBestAction": "Follow up",
+            "recommendation": {
+                "summary": "Pending",
+                "fitNarrative": "Pending",
+                "nextBestAction": "Follow up",
+            },
+            "scholarshipOptions": [],
+            "scholarshipOffers": [],
         }
 
-    monkeypatch.setattr(student_routes.student_service, "update_student_program", fake_update_program)
+    monkeypatch.setattr(student_routes.student_service, "update_student", fake_update_student)
 
     client = TestClient(_build_test_app())
     response = client.patch(
         "/api/v1/students/STU-123",
-        json={"program": "BS Computer Science", "degreeProgram": "BS Computer Science"},
+        json={"program": "BS Computer Science", "degreeProgram": "BS Computer Science", "phone": "555-1212"},
     )
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["id"] == "STU-123"
-    assert payload["program"] == "BS Computer Science"
-    assert payload["degreeProgram"] == "BS Computer Science"
-    assert payload["stage"] == "Applicant"
+    assert payload["student"]["id"] == "STU-123"
+    assert payload["student"]["program"] == "BS Computer Science"
+    assert payload["student"]["degreeProgram"] == "BS Computer Science"
+    assert payload["student"]["phone"] == "555-1212"
+    assert payload["student"]["stage"] == "Applicant"
     assert captured["student_id"] == "STU-123"
+    assert captured["phone"] == "555-1212"
 
 
 def test_post_student_next_action_records_work_state(monkeypatch):
@@ -554,6 +583,19 @@ def test_student_counselor_extension_routes(monkeypatch):
     )
     monkeypatch.setattr(
         student_routes.student_service,
+        "send_student_communication",
+        lambda **kwargs: {
+            "communication": {
+                "id": "int-2",
+                "channel": kwargs["payload"]["channel"],
+                "provider": kwargs["payload"]["provider"],
+                "providerMessageId": "SM123",
+                "status": "queued",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        student_routes.student_service,
         "create_student_handoff",
         lambda **kwargs: {"handoff": {"id": "handoff-1", "targetTeam": kwargs["payload"]["targetTeam"], "status": "Open"}},
     )
@@ -571,12 +613,16 @@ def test_student_counselor_extension_routes(monkeypatch):
     client = TestClient(_build_test_app())
 
     communication = client.post("/api/v1/students/STU-123/communications/log", json={"channel": "email", "message": "Hello"})
+    sent_text = client.post("/api/v1/students/STU-123/communications/send", json={"channel": "text", "provider": "twilio", "to": "5551212", "message": "Hello"})
     handoff = client.post("/api/v1/students/STU-123/handoffs", json={"targetTeam": "Financial Aid"})
     readiness = client.get("/api/v1/students/STU-123/post-admit-readiness")
     milestone = client.post("/api/v1/students/STU-123/milestones/registration_status/status", json={"status": "Complete"})
 
     assert communication.status_code == 200
     assert communication.json()["communication"]["status"] == "logged"
+    assert sent_text.status_code == 200
+    assert sent_text.json()["communication"]["provider"] == "twilio"
+    assert sent_text.json()["communication"]["providerMessageId"] == "SM123"
     assert handoff.status_code == 200
     assert handoff.json()["handoff"]["targetTeam"] == "Financial Aid"
     assert readiness.status_code == 200

@@ -154,6 +154,18 @@ class Student360ListRecord(BaseModel):
     preferredName: str | None = None
     email: str | None = None
     phone: str | None = None
+    smsOptIn: bool | None = None
+    textingOk: bool | None = None
+    textConsent: bool | None = None
+    addressLine1: str | None = None
+    addressLine2: str | None = None
+    state: str | None = None
+    postalCode: str | None = None
+    parentName: str | None = None
+    parentRelationship: str | None = None
+    parentEmail: str | None = None
+    parentPhone: str | None = None
+    notes: str | None = None
     program: str | StudentProgramSummary
     degreeProgram: str | None = None
     population: str | None = None
@@ -327,8 +339,29 @@ class StudentTimelineResponse(BaseModel):
 
 
 class StudentProgramUpdateRequest(BaseModel):
+    name: str | None = None
+    preferredName: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    smsOptIn: bool | None = None
+    textingOk: bool | None = None
+    textConsent: bool | None = None
+    addressLine1: str | None = None
+    addressLine2: str | None = None
+    city: str | None = None
+    state: str | None = None
+    postalCode: str | None = None
+    parentName: str | None = None
+    parentRelationship: str | None = None
+    parentEmail: str | None = None
+    parentPhone: str | None = None
+    advisor: str | None = None
+    population: str | None = None
+    source: str | None = None
+    notes: str | None = None
     program: str | None = None
     degreeProgram: str | None = None
+    programInterest: str | None = None
 
 
 class StudentProgramUpdateResponse(BaseModel):

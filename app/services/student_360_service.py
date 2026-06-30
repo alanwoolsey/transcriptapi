@@ -5,12 +5,16 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+import httpx
 from sqlalchemy import Select, String, cast, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
+from app.core.config import settings
 from app.db.models import (
     AppUser,
     AuditEvent,
+    CommunicationEvent,
+    CommunicationMessage,
     DecisionPacket,
     DecisionPacketEvent,
     DocumentUpload,
@@ -19,13 +23,16 @@ from app.db.models import (
     Prospect,
     ProspectSourceReference,
     Student,
+    StudentAddress,
     StudentAgentState,
     StudentChecklistItem as DbStudentChecklistItem,
+    StudentContactMethod,
     StudentDecisionReadiness,
     StudentEnrollmentMilestone,
     StudentIdentifier,
     StudentInteraction,
     StudentNote,
+    StudentRelationship,
     StudentSource,
     StudentTask,
     StudentYieldScore,
@@ -405,6 +412,121 @@ class Student360Service:
             }
         }
 
+    def send_student_communication(self, db: Session, tenant_id: UUID, actor_user_id: UUID, student_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        student = self._resolve_student_row(db, tenant_id, student_id)
+        if student is None:
+            raise LookupError("Student not found.")
+
+        channel = str(payload.get("channel") or "").strip().lower()
+        provider = str(payload.get("provider") or "").strip().lower()
+        if channel != "text" or provider != "twilio":
+            raise ValueError("Only Twilio text sending is supported by this endpoint.")
+
+        message = self._safe_optional_str(payload.get("message") or payload.get("body"))
+        if not message:
+            raise ValueError("Message is required.")
+
+        to_phone = self._safe_optional_str(payload.get("to") or payload.get("recipientPhone") or student.phone)
+        if not to_phone:
+            raise ValueError("Student phone number is required before sending a text.")
+        if not settings.twilio_account_sid or not settings.twilio_auth_token:
+            raise ValueError("Twilio is not configured.")
+        if not settings.twilio_messaging_service_sid and not settings.twilio_from_number:
+            raise ValueError("Twilio sender is not configured.")
+
+        now = datetime.now(timezone.utc)
+        twilio_payload: dict[str, str] = {
+            "To": to_phone,
+            "Body": message,
+        }
+        if settings.twilio_messaging_service_sid:
+            twilio_payload["MessagingServiceSid"] = settings.twilio_messaging_service_sid
+        else:
+            twilio_payload["From"] = settings.twilio_from_number or ""
+
+        twilio_url = f"https://api.twilio.com/2010-04-01/Accounts/{settings.twilio_account_sid}/Messages.json"
+        try:
+            with httpx.Client(timeout=settings.twilio_request_timeout_seconds) as client:
+                response = client.post(
+                    twilio_url,
+                    data=twilio_payload,
+                    auth=(settings.twilio_account_sid, settings.twilio_auth_token),
+                )
+            twilio_response = response.json() if response.content else {}
+        except httpx.HTTPError as exc:
+            raise ValueError(f"Twilio send failed: {exc}") from exc
+
+        if response.status_code >= 400:
+            detail = twilio_response.get("message") if isinstance(twilio_response, dict) else None
+            raise ValueError(detail or f"Twilio send failed with status {response.status_code}.")
+
+        provider_message_id = twilio_response.get("sid") if isinstance(twilio_response, dict) else None
+        status = twilio_response.get("status") if isinstance(twilio_response, dict) else "sent"
+        communication_message = CommunicationMessage(
+            tenant_id=tenant_id,
+            student_id=student.id,
+            application_id=None,
+            template_id=None,
+            channel="text",
+            direction="outbound",
+            subject=payload.get("subject"),
+            body=message,
+            status=status or "sent",
+            provider_message_id=provider_message_id,
+            sent_at=now,
+            metadata_json={
+                "provider": "twilio",
+                "to": to_phone,
+                "templateKey": payload.get("templateKey"),
+                "templateLabel": payload.get("templateLabel"),
+                "twilio": twilio_response if isinstance(twilio_response, dict) else {},
+            },
+        )
+        db.add(communication_message)
+        db.flush()
+        db.add(
+            CommunicationEvent(
+                tenant_id=tenant_id,
+                message_id=communication_message.id,
+                event_type=status or "sent",
+                payload_json=twilio_response if isinstance(twilio_response, dict) else {},
+                occurred_at=now,
+            )
+        )
+
+        interaction_payload = type(
+            "CommunicationPayload",
+            (),
+            {
+                "type": "communication",
+                "outcome": status or "sent",
+                "title": payload.get("templateLabel") or payload.get("subject") or "Text outreach",
+                "note": message,
+                "description": message,
+                "nextAction": payload.get("nextAction"),
+                "nextFollowUpAt": payload.get("nextFollowUpAt"),
+                "occurredAt": payload.get("occurredAt") or now.isoformat(),
+                "actor": payload.get("actor"),
+                "source": payload.get("source") or "student_360_outreach",
+            },
+        )()
+        created = self.create_student_interaction(db, tenant_id, actor_user_id, student_id, interaction_payload)["interaction"]
+        return {
+            "communication": {
+                **created.model_dump(mode="json"),
+                "channel": "text",
+                "provider": "twilio",
+                "providerMessageId": provider_message_id,
+                "messageSid": provider_message_id,
+                "to": to_phone,
+                "subject": payload.get("subject"),
+                "message": message,
+                "status": status or "sent",
+                "templateKey": payload.get("templateKey"),
+                "templateLabel": payload.get("templateLabel"),
+            }
+        }
+
     def get_post_admit_readiness(self, tenant_id: UUID, student_id: str) -> dict[str, Any]:
         session_factory = self.session_factory()
         with session_factory() as session:
@@ -706,6 +828,206 @@ class Student360Service:
             "degreeProgram": program_value,
             "stage": canonical_pipeline_status(student.current_stage),
         }
+
+    def update_student(
+        self,
+        db: Session,
+        tenant_id: UUID,
+        actor_user_id: UUID,
+        student_id: str,
+        payload: Any,
+        authorization: Any | None = None,
+    ) -> Student360Record:
+        student = self._resolve_student_row(db, tenant_id, student_id)
+        if student is None:
+            raise LookupError("Student not found.")
+
+        now = datetime.now(timezone.utc)
+        data = payload.model_dump(exclude_unset=True) if hasattr(payload, "model_dump") else dict(payload or {})
+        previous = {
+            "email": student.email,
+            "phone": student.phone,
+            "city": student.city,
+            "state": student.state,
+            "preferred_name": student.preferred_name,
+            "target_program_id": str(student.target_program_id) if student.target_program_id else None,
+        }
+
+        full_name = self._safe_optional_str(data.get("name"))
+        if full_name:
+            parts = full_name.split()
+            student.first_name = parts[0]
+            student.last_name = " ".join(parts[1:]) or student.last_name
+        if "preferredName" in data:
+            student.preferred_name = self._safe_optional_str(data.get("preferredName"))
+        if "email" in data:
+            student.email = self._safe_optional_str(data.get("email"))
+        if "phone" in data:
+            student.phone = self._safe_optional_str(data.get("phone"))
+        if "city" in data:
+            student.city = self._safe_optional_str(data.get("city"))
+        if "state" in data:
+            student.state = self._safe_optional_str(data.get("state"))
+
+        program_value = self._safe_optional_str(data.get("degreeProgram") or data.get("program") or data.get("programInterest"))
+        if program_value:
+            program = db.execute(
+                select(Program)
+                .where(Program.tenant_id == tenant_id, Program.name == program_value)
+                .order_by(Program.created_at.asc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if program is None:
+                program = Program(tenant_id=tenant_id, institution_id=student.target_institution_id, name=program_value, is_active=True)
+                db.add(program)
+                db.flush()
+            student.target_program_id = program.id
+
+        prospect = db.execute(
+            select(Prospect)
+            .where(Prospect.tenant_id == tenant_id, Prospect.student_id == student.id)
+            .order_by(Prospect.updated_at.desc(), Prospect.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if prospect is not None:
+            prospect.email = student.email or prospect.email
+            prospect.phone = student.phone or prospect.phone
+            if program_value:
+                prospect.program_interest = program_value
+            if "population" in data and self._safe_optional_str(data.get("population")):
+                prospect.population = self._safe_optional_str(data.get("population")) or prospect.population
+            if "source" in data and self._safe_optional_str(data.get("source")):
+                prospect.source = self._safe_optional_str(data.get("source")) or prospect.source
+            if any(key in data for key in ("smsOptIn", "textingOk", "textConsent")):
+                prospect.consent_captured = bool(data.get("smsOptIn") or data.get("textingOk") or data.get("textConsent"))
+            prospect.updated_at = now
+
+        sms_opt_in = bool(data.get("smsOptIn") or data.get("textingOk") or data.get("textConsent"))
+        if "phone" in data and student.phone:
+            contact = db.execute(
+                select(StudentContactMethod)
+                .where(
+                    StudentContactMethod.tenant_id == tenant_id,
+                    StudentContactMethod.student_id == student.id,
+                    StudentContactMethod.contact_type == "phone",
+                    StudentContactMethod.is_primary.is_(True),
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+            if contact is None:
+                contact = StudentContactMethod(
+                    tenant_id=tenant_id,
+                    student_id=student.id,
+                    contact_type="phone",
+                    value=student.phone,
+                    is_primary=True,
+                    allows_sms=sms_opt_in,
+                    allows_email=False,
+                    source="student_360_update",
+                )
+                db.add(contact)
+            else:
+                contact.value = student.phone
+                contact.allows_sms = sms_opt_in
+                contact.updated_at = now
+        elif any(key in data for key in ("smsOptIn", "textingOk", "textConsent")):
+            contact = db.execute(
+                select(StudentContactMethod)
+                .where(
+                    StudentContactMethod.tenant_id == tenant_id,
+                    StudentContactMethod.student_id == student.id,
+                    StudentContactMethod.contact_type == "phone",
+                    StudentContactMethod.is_primary.is_(True),
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+            if contact is not None:
+                contact.allows_sms = sms_opt_in
+                contact.updated_at = now
+
+        if any(key in data for key in ("addressLine1", "addressLine2", "city", "state", "postalCode")):
+            address = db.execute(
+                select(StudentAddress)
+                .where(
+                    StudentAddress.tenant_id == tenant_id,
+                    StudentAddress.student_id == student.id,
+                    StudentAddress.is_primary.is_(True),
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+            if address is None:
+                address = StudentAddress(
+                    tenant_id=tenant_id,
+                    student_id=student.id,
+                    address_type="mailing",
+                    is_primary=True,
+                    source="student_360_update",
+                )
+                db.add(address)
+            address.line1 = self._safe_optional_str(data.get("addressLine1")) if "addressLine1" in data else address.line1
+            address.line2 = self._safe_optional_str(data.get("addressLine2")) if "addressLine2" in data else address.line2
+            address.city = student.city if "city" in data else address.city
+            address.state = student.state if "state" in data else address.state
+            address.postal_code = self._safe_optional_str(data.get("postalCode")) if "postalCode" in data else address.postal_code
+            address.country = address.country or "US"
+            address.updated_at = now
+
+        if any(key in data for key in ("parentName", "parentRelationship", "parentEmail", "parentPhone")):
+            parent_name = self._safe_optional_str(data.get("parentName"))
+            relationship = self._safe_optional_str(data.get("parentRelationship")) or "Parent/guardian"
+            relationship_row = db.execute(
+                select(StudentRelationship)
+                .where(StudentRelationship.tenant_id == tenant_id, StudentRelationship.student_id == student.id)
+                .order_by(StudentRelationship.updated_at.desc(), StudentRelationship.created_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if relationship_row is None and parent_name:
+                relationship_row = StudentRelationship(
+                    tenant_id=tenant_id,
+                    student_id=student.id,
+                    related_person_name=parent_name,
+                    relationship_type=relationship,
+                )
+                db.add(relationship_row)
+            if relationship_row is not None:
+                if parent_name:
+                    relationship_row.related_person_name = parent_name
+                relationship_row.relationship_type = relationship
+                relationship_row.email = self._safe_optional_str(data.get("parentEmail")) if "parentEmail" in data else relationship_row.email
+                relationship_row.phone = self._safe_optional_str(data.get("parentPhone")) if "parentPhone" in data else relationship_row.phone
+                relationship_row.updated_at = now
+
+        if "notes" in data and self._safe_optional_str(data.get("notes")):
+            db.add(
+                StudentNote(
+                    tenant_id=tenant_id,
+                    student_id=student.id,
+                    transcript_id=None,
+                    author_user_id=actor_user_id,
+                    note_type="student_profile",
+                    body=self._safe_optional_str(data.get("notes")) or "",
+                    is_internal=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        student.updated_at = now
+        student.latest_activity_at = now
+
+        self._write_student_audit(
+            db,
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            student_id=student.id,
+            action="student_profile_updated",
+            metadata={
+                "previous": previous,
+                "updatedFields": sorted(data.keys()),
+            },
+        )
+        db.commit()
+        return self.get_student(tenant_id=tenant_id, student_id=str(student.id), authorization=authorization)
 
     def record_next_action(self, db: Session, tenant_id: UUID, actor_user_id: UUID, student_id: str, payload: Any) -> dict[str, str | None]:
         action_type = (payload.actionType or "").strip().lower()
@@ -1814,13 +2136,56 @@ class Student360Service:
             milestones=post_admit_milestones,
             scholarship_offers=scholarship_offers,
         )
+        primary_phone_contact = db.execute(
+            select(StudentContactMethod)
+            .where(
+                StudentContactMethod.tenant_id == tenant_id,
+                StudentContactMethod.student_id == student.id,
+                StudentContactMethod.contact_type == "phone",
+                StudentContactMethod.is_primary.is_(True),
+            )
+            .order_by(StudentContactMethod.updated_at.desc(), StudentContactMethod.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        primary_address = db.execute(
+            select(StudentAddress)
+            .where(StudentAddress.tenant_id == tenant_id, StudentAddress.student_id == student.id, StudentAddress.is_primary.is_(True))
+            .order_by(StudentAddress.updated_at.desc(), StudentAddress.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        parent_guardian = db.execute(
+            select(StudentRelationship)
+            .where(StudentRelationship.tenant_id == tenant_id, StudentRelationship.student_id == student.id)
+            .order_by(StudentRelationship.updated_at.desc(), StudentRelationship.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        latest_profile_note = db.execute(
+            select(StudentNote)
+            .where(StudentNote.tenant_id == tenant_id, StudentNote.student_id == student.id, StudentNote.note_type == "student_profile")
+            .order_by(StudentNote.updated_at.desc(), StudentNote.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        sms_opt_in = bool(primary_phone_contact.allows_sms) if primary_phone_contact is not None else False
+        display_phone = student.phone or (primary_phone_contact.value if primary_phone_contact is not None else None)
         return Student360Record(
             id=str(student.id),
             studentId=student.external_student_id or str(student.id),
             name=self._join_name(student.first_name, student.last_name, fallback="Unknown Student"),
             preferredName=student.preferred_name or student.first_name or "Student",
             email=student.email,
-            phone=student.phone,
+            phone=display_phone,
+            smsOptIn=sms_opt_in,
+            textingOk=sms_opt_in,
+            textConsent=sms_opt_in,
+            addressLine1=primary_address.line1 if primary_address is not None else None,
+            addressLine2=primary_address.line2 if primary_address is not None else None,
+            state=primary_address.state if primary_address is not None else student.state,
+            postalCode=primary_address.postal_code if primary_address is not None else None,
+            parentName=parent_guardian.related_person_name if parent_guardian is not None else None,
+            parentRelationship=parent_guardian.relationship_type if parent_guardian is not None else None,
+            parentEmail=parent_guardian.email if parent_guardian is not None else None,
+            parentPhone=parent_guardian.phone if parent_guardian is not None else None,
+            notes=latest_profile_note.body if latest_profile_note is not None else None,
             program=program_summary,
             degreeProgram=program_summary.name,
             population=student_type,
