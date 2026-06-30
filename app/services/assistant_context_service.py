@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -100,8 +101,9 @@ class AssistantContextService:
         message = payload.message.lower()
         route = (payload.route or "").lower()
         has_student = bool(payload.activeEntity and payload.activeEntity.type == "student" and payload.activeEntity.id) or "/students/" in route
-        if any(word in message for word in ["missing", "checklist", "required", "complete", "incomplete"]) and has_student:
-            return IntentPlan("student_checklist_question", 0.92, ["get_active_student_summary", "get_student_checklist_summary", "get_student_documents_summary"])
+        names_student = bool(self.extract_student_name(payload.message))
+        if any(word in message for word in ["missing", "checklist", "required", "complete", "incomplete"]) and (has_student or names_student):
+            return IntentPlan("student_checklist_question", 0.92, ["resolve_student_by_name", "get_active_student_summary", "get_student_checklist_summary", "get_student_documents_summary"])
         if any(word in message for word in ["document", "transcript", "file", "upload"]) and has_student:
             return IntentPlan("student_documents_question", 0.9, ["get_active_student_summary", "get_student_documents_summary"])
         if any(word in message for word in ["timeline", "history", "recent", "activity"]) and has_student:
@@ -110,6 +112,8 @@ class AssistantContextService:
             return IntentPlan("student_decision_question", 0.84, ["get_active_student_summary", "get_student_checklist_summary"])
         if any(word in message for word in ["draft", "email", "text", "message", "communicat"]) and has_student:
             return IntentPlan("student_communication_draft", 0.88, ["get_active_student_summary", "get_student_checklist_summary", "get_recent_communication_summary"])
+        if any(phrase in message for phrase in ["next best", "what should i do", "what should i work", "work on next", "prioritize my", "where should i start"]):
+            return IntentPlan("counselor_next_best_action", 0.88, ["get_counselor_today_work"])
         if any(word in message for word in ["which students", "students need", "who needs", "missing transcripts", "follow-up", "follow up"]):
             return IntentPlan("workflow_queue_question", 0.78, ["search_students"])
         if any(word in message for word in ["report", "how many", "count", "trend", "workload"]):
@@ -143,6 +147,8 @@ class AssistantContextService:
             "restrictions": [],
         }
         active_student_id = self.resolve_active_student_id(payload)
+        if not active_student_id and "resolve_student_by_name" in plan.tools and auth_context.authorization.can("view_student_360"):
+            active_student_id = self.resolve_student_id_by_name(payload.message, auth_context, packet)
         if "get_active_student_summary" in plan.tools and active_student_id and auth_context.authorization.can("view_student_360"):
             student = self.student_service.get_student(auth_context.tenant.id, active_student_id, auth_context.authorization)
             if student:
@@ -156,6 +162,7 @@ class AssistantContextService:
                 summary = self.checklist_summary(checklist)
                 retrieved.append({"sourceId": f"{active_student_id}:checklist", "type": "checklist_summary", "summary": summary})
                 citations.append({"id": f"{active_student_id}:checklist", "label": "Student checklist", "type": "student_checklist", "route": f"/students/{active_student_id}?tab=checklist"})
+                packet["answerFocus"] = self.answer_focus_for_checklist_question(packet, summary)
             except Exception:
                 packet["restrictions"].append({"type": "checklist_summary", "reason": "Checklist data unavailable."})
         if "get_student_documents_summary" in plan.tools and active_student_id and auth_context.authorization.can("view_student_360"):
@@ -181,6 +188,12 @@ class AssistantContextService:
             students = [self.student_list_summary(item) for item in search.students[:10]]
             retrieved.append({"sourceId": "students:search", "type": "student_search", "summary": {"students": students, "total": search.total}})
             citations.append({"id": "students:search", "label": "Student search results", "type": "student_search", "route": "/students"})
+        if "get_counselor_today_work" in plan.tools and auth_context.authorization.can("view_student_360"):
+            today_work = self.admissions_ops_service.get_counselor_today_work(auth_context.tenant.id, limit=75)
+            summary = self.counselor_today_work_summary(today_work, auth_context)
+            retrieved.append({"sourceId": "work:counselor_today", "type": "counselor_today_work", "summary": summary})
+            citations.append({"id": "work:counselor_today", "label": "Counselor today's work", "type": "work_queue", "route": "/work/counselor/today"})
+            packet["answerFocus"] = self.answer_focus_for_counselor_next_action(summary)
         if "get_route_capabilities" in plan.tools:
             retrieved.append({"sourceId": "app:route_capabilities", "type": "app_help", "summary": self.route_capabilities(payload.route)})
             citations.append({"id": "app:route_capabilities", "label": "crtfy Student route capabilities", "type": "app_help", "route": payload.route})
@@ -206,8 +219,12 @@ class AssistantContextService:
     def build_governed_payload(self, payload: AssistantChatRequest, context_packet: dict[str, Any], auth_context: AuthenticatedTenantContext) -> dict[str, Any]:
         context_text = json.dumps(context_packet, default=str, separators=(",", ":"))
         message = (
-            "Use the authorized crtfy Student application context below. "
+            "Answer the user's crtfy Student question using only the authorized application context below. "
+            "First use ANSWER_FOCUS_JSON when present; it contains the broker's best task-specific data. "
+            "Use APP_CONTEXT_JSON only to support or clarify the answer. "
+            "If a named student cannot be resolved or the needed data is absent, say what is missing from context. "
             "Do not reveal data that is absent from the context. Cite source labels when using context.\n\n"
+            f"ANSWER_FOCUS_JSON:\n{json.dumps(context_packet.get('answerFocus') or {}, default=str, separators=(',', ':'))}\n\n"
             f"APP_CONTEXT_JSON:\n{context_text}\n\nUSER_MESSAGE:\n{payload.message}"
         )
         return {
@@ -299,6 +316,42 @@ class AssistantContextService:
             return parts[1]
         return None
 
+    def resolve_student_id_by_name(self, message: str, auth_context: AuthenticatedTenantContext, packet: dict[str, Any]) -> str | None:
+        student_name = self.extract_student_name(message)
+        if not student_name:
+            return None
+        search = self.student_service.list_students(auth_context.tenant.id, q=student_name, limit=5, offset=0)
+        matches = [self.student_list_summary(item) for item in search.students[:5]]
+        packet["studentResolution"] = {
+            "query": student_name,
+            "matchCount": len(matches),
+            "matches": matches,
+        }
+        if len(matches) == 1 and matches[0].get("id"):
+            return str(matches[0]["id"])
+        exact_matches = [item for item in matches if str(item.get("name", "")).lower() == student_name.lower() and item.get("id")]
+        if len(exact_matches) == 1:
+            return str(exact_matches[0]["id"])
+        if matches:
+            packet["restrictions"].append({"type": "student_resolution", "reason": "Multiple possible students matched the requested name."})
+        return None
+
+    @staticmethod
+    def extract_student_name(message: str) -> str | None:
+        text = " ".join((message or "").strip().split())
+        patterns = [
+            r"\bstudent\s+([A-Z][A-Za-z' -]+?)(?:\s+(?:missing|need|needs|required|complete|incomplete)\b|[?.!,]|$)",
+            r"\bfor\s+([A-Z][A-Za-z' -]+?)(?:\s+(?:missing|need|needs|required|complete|incomplete)\b|[?.!,]|$)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                name = match.group(1).strip(" ?.!,")
+                name = re.sub(r"^(student|the student)\s+", "", name, flags=re.IGNORECASE).strip()
+                if len(name.split()) >= 2:
+                    return " ".join(part.capitalize() for part in name.split())
+        return None
+
     @staticmethod
     def model_dump(value: Any) -> dict[str, Any]:
         if hasattr(value, "model_dump"):
@@ -346,6 +399,106 @@ class AssistantContextService:
             "missing": missing,
             "complete": complete,
             "totalItems": len(items),
+        }
+
+    def counselor_today_work_summary(self, today_work: Any, auth_context: AuthenticatedTenantContext) -> dict[str, Any]:
+        data = self.model_dump(today_work)
+        buckets = data.get("buckets") or []
+        bucket_summaries: list[dict[str, Any]] = []
+        all_items: list[dict[str, Any]] = []
+        for bucket in buckets:
+            if not isinstance(bucket, dict):
+                continue
+            items = [self.work_item_summary(item, auth_context) for item in bucket.get("items", []) if isinstance(item, dict)]
+            bucket_summaries.append(
+                {
+                    "key": bucket.get("key"),
+                    "label": bucket.get("label"),
+                    "meaning": bucket.get("meaning"),
+                    "count": len(items),
+                    "topItems": items[:5],
+                }
+            )
+            all_items.extend(items)
+        top_items = sorted(
+            all_items,
+            key=lambda item: (
+                not item.get("ownedByCurrentUser", False),
+                -(item.get("priorityScore") or 0),
+                item.get("priority") not in {"urgent", "today"},
+            ),
+        )[:10]
+        return {
+            "totalItems": len(all_items),
+            "ownedByCurrentUserCount": sum(1 for item in all_items if item.get("ownedByCurrentUser")),
+            "buckets": bucket_summaries,
+            "recommendedTopItems": top_items,
+        }
+
+    def work_item_summary(self, item: dict[str, Any], auth_context: AuthenticatedTenantContext) -> dict[str, Any]:
+        owner = item.get("owner") or {}
+        owner_id = str(owner.get("id") or "") if isinstance(owner, dict) else ""
+        owner_name = str(owner.get("name") or "") if isinstance(owner, dict) else ""
+        user_id = str(auth_context.user.id)
+        user_name = str(auth_context.user.display_name or "")
+        reason = item.get("reasonToAct") or {}
+        action = item.get("suggestedAction") or {}
+        blocking_items = item.get("blockingItems") or []
+        return {
+            "studentId": item.get("studentId"),
+            "studentName": item.get("studentName"),
+            "stage": item.get("stage"),
+            "section": item.get("section"),
+            "priority": item.get("priority"),
+            "priorityScore": item.get("priorityScore"),
+            "owner": owner_name,
+            "ownedByCurrentUser": bool((owner_id and owner_id == user_id) or (owner_name and owner_name.lower() == user_name.lower())),
+            "reasonToAct": reason.get("label") if isinstance(reason, dict) else None,
+            "suggestedAction": action.get("label") if isinstance(action, dict) else None,
+            "blockingItems": [
+                entry.get("label")
+                for entry in blocking_items[:5]
+                if isinstance(entry, dict) and entry.get("label")
+            ],
+            "nextFollowUpAt": item.get("nextFollowUpAt"),
+            "routeHint": item.get("routeHint"),
+        }
+
+    @staticmethod
+    def answer_focus_for_checklist_question(packet: dict[str, Any], checklist_summary: dict[str, Any]) -> dict[str, Any]:
+        student_summary = (packet.get("activeEntity") or {}).get("summary") or {}
+        return {
+            "questionType": "student_missing_items",
+            "student": {
+                "id": (packet.get("activeEntity") or {}).get("id"),
+                "name": student_summary.get("name"),
+                "stage": student_summary.get("stage"),
+                "program": student_summary.get("program"),
+            },
+            "checklistStatus": checklist_summary.get("status"),
+            "completionPercent": checklist_summary.get("completionPercent"),
+            "missingItems": checklist_summary.get("missing") or [],
+            "completeItems": checklist_summary.get("complete") or [],
+            "sourceIds": [
+                citation["id"]
+                for citation in packet.get("citations", [])
+                if citation.get("type") in {"student_summary", "student_checklist"}
+            ],
+        }
+
+    @staticmethod
+    def answer_focus_for_counselor_next_action(work_summary: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "questionType": "counselor_next_best_action",
+            "instruction": "Recommend the highest-value next action for the current counselor. Prefer owned items, urgent/today priority, high priorityScore, overdue follow-up, and explicit suggestedAction/reasonToAct.",
+            "totalWorkItems": work_summary.get("totalItems", 0),
+            "ownedByCurrentUserCount": work_summary.get("ownedByCurrentUserCount", 0),
+            "recommendedTopItems": work_summary.get("recommendedTopItems", []),
+            "bucketCounts": [
+                {"key": bucket.get("key"), "label": bucket.get("label"), "count": bucket.get("count")}
+                for bucket in work_summary.get("buckets", [])
+            ],
+            "sourceIds": ["work:counselor_today"],
         }
 
     @staticmethod

@@ -71,9 +71,108 @@ def test_context_service_retrieves_compact_current_student_context(monkeypatch):
     )
 
     assert response.retrieval.intent == "student_checklist_question"
+    assert "ANSWER_FOCUS_JSON" in captured["payload"]["message"]
     assert "APP_CONTEXT_JSON" in captured["payload"]["message"]
     assert "High school transcript" in captured["payload"]["message"]
     assert response.auditId == "audit-1"
+
+
+def test_context_service_resolves_named_student_for_missing_items(monkeypatch):
+    student_id = "student-mia"
+    student = SimpleNamespace(
+        model_dump=lambda **kwargs: {
+            "id": student_id,
+            "name": "Mia Brown",
+            "program": "Student Search Service",
+            "stage": "Prospect",
+            "risk": "Low",
+            "advisor": "Alan Woolsey",
+        }
+    )
+    search_response = SimpleNamespace(students=[student], total=1)
+    checklist = SimpleNamespace(
+        model_dump=lambda **kwargs: {
+            "status": "incomplete",
+            "completionPercent": 0,
+            "oneItemAway": False,
+            "items": [
+                {"label": "Application form", "done": False},
+                {"label": "FAFSA", "done": False},
+                {"label": "Official transcript", "done": False},
+            ],
+        }
+    )
+    student_service = SimpleNamespace(
+        list_students=lambda *args, **kwargs: search_response,
+        get_student=lambda *args, **kwargs: student,
+    )
+    admissions_ops_service = SimpleNamespace(get_student_checklist=lambda *args, **kwargs: checklist)
+    service = AssistantContextService(student_service=student_service, admissions_ops_service=admissions_ops_service)
+    captured = {}
+
+    def fake_governed(payload, auth_context):
+        captured["payload"] = payload
+        return {"response": "Mia Brown is missing Application form, FAFSA, and Official transcript."}
+
+    monkeypatch.setattr(service, "call_governed_ai", fake_governed)
+
+    response = service.run_chat(
+        AssistantChatRequest(message="what is student mia brown missing", route="/students"),
+        _auth_context(),
+    )
+
+    assert response.retrieval.intent == "student_checklist_question"
+    assert "Mia Brown" in captured["payload"]["message"]
+    assert '"missingItems":["Application form","FAFSA","Official transcript"]' in captured["payload"]["message"]
+
+
+def test_context_service_retrieves_counselor_today_work_for_next_best_action(monkeypatch):
+    auth_context = _auth_context()
+    work_response = SimpleNamespace(
+        model_dump=lambda **kwargs: {
+            "buckets": [
+                {
+                    "key": "incomplete",
+                    "label": "Incomplete",
+                    "meaning": "Missing transcript, essay, fee, etc.",
+                    "items": [
+                        {
+                            "studentId": "student-1",
+                            "studentName": "Mia Brown",
+                            "stage": "Prospect",
+                            "section": "incomplete",
+                            "priority": "urgent",
+                            "priorityScore": 94,
+                            "owner": {"id": str(auth_context.user.id), "name": auth_context.user.display_name},
+                            "reasonToAct": {"code": "missing_docs", "label": "Student is blocked by missing documents"},
+                            "suggestedAction": {"code": "request_docs", "label": "Request missing application documents"},
+                            "blockingItems": [{"label": "Official transcript"}, {"label": "FAFSA"}],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    admissions_ops_service = SimpleNamespace(get_counselor_today_work=lambda *args, **kwargs: work_response)
+    service = AssistantContextService(student_service=SimpleNamespace(), admissions_ops_service=admissions_ops_service)
+    captured = {}
+
+    def fake_governed(payload, auth_context):
+        captured["payload"] = payload
+        return {"response": "Start with Mia Brown and request missing application documents."}
+
+    monkeypatch.setattr(service, "call_governed_ai", fake_governed)
+
+    response = service.run_chat(
+        AssistantChatRequest(message="what is the next best thing for me to do", route="/work"),
+        auth_context,
+    )
+
+    assert response.retrieval.intent == "counselor_next_best_action"
+    assert "ANSWER_FOCUS_JSON" in captured["payload"]["message"]
+    assert '"questionType":"counselor_next_best_action"' in captured["payload"]["message"]
+    assert "Mia Brown" in captured["payload"]["message"]
+    assert "Request missing application documents" in captured["payload"]["message"]
 
 
 def test_context_service_classifies_document_with_governed_ai(monkeypatch):
